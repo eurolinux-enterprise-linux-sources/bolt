@@ -27,12 +27,16 @@
 
 #include "bolt-exported.h"
 
+/* Each element must only contain the ASCII characters "[A-Z][a-z][0-9]_" */
+#define DBUS_OPATH_VALID_CHARS "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
+
 typedef struct _BoltExportedMethod BoltExportedMethod;
 typedef struct _BoltExportedProp   BoltExportedProp;
 
-
 static GVariant * bolt_exported_get_prop (BoltExported     *exported,
                                           BoltExportedProp *prop);
+
+static char *     bolt_exported_make_object_path (BoltExported *exported);
 
 static void       bolt_exported_dispatch_properties_changed (GObject     *object,
                                                              guint        n_pspecs,
@@ -80,6 +84,7 @@ struct _BoltExportedProp
   /* auto string conversion */
   GEnumClass  *enum_class; /* shortcut for spec->enum_class */
   GFlagsClass *flags_class; /* shortcut for spec->enum_class */
+  gboolean     object_conv;
 };
 
 struct _BoltExportedClassPrivate
@@ -87,6 +92,7 @@ struct _BoltExportedClassPrivate
   GDBusNodeInfo      *node_info;
   char               *iface_name;
   GDBusInterfaceInfo *iface_info;
+  char               *object_path;
 
   GHashTable         *methods;
   GHashTable         *properties;
@@ -157,6 +163,7 @@ bolt_exported_get_type (void)
 enum {
   PROP_0,
 
+  PROP_OBJECT_ID,
   PROP_OBJECT_PATH,
   PROP_EXPORTED,
 
@@ -181,6 +188,9 @@ bolt_exported_finalize (GObject *object)
   BoltExported *exported = BOLT_EXPORTED (object);
   BoltExportedPrivate *priv = GET_PRIV (exported);
 
+  if (bolt_exported_is_exported (exported))
+    bolt_exported_unexport (exported);
+
   g_clear_pointer (&priv->object_path, g_free);
   g_ptr_array_free (priv->props_changed, TRUE);
 
@@ -199,6 +209,10 @@ bolt_exported_get_property (GObject    *object,
 
   switch (prop_id)
     {
+    case PROP_OBJECT_ID:
+      bolt_bug ("BoltExported::object-id must be overridden");
+      break;
+
     case PROP_OBJECT_PATH:
       g_value_set_string (value, priv->object_path);
       break;
@@ -236,6 +250,13 @@ bolt_exported_class_init (BoltExportedClass *klass)
   klass->authorize_method = handle_authorize_method_default;
   klass->authorize_property = handle_authorize_property_default;
 
+  props[PROP_OBJECT_ID] =
+    g_param_spec_string ("object-id",
+                         NULL, NULL,
+                         NULL,
+                         G_PARAM_READABLE |
+                         G_PARAM_STATIC_NICK);
+
   props[PROP_OBJECT_PATH] =
     g_param_spec_string ("object-path",
                          NULL, NULL,
@@ -248,6 +269,10 @@ bolt_exported_class_init (BoltExportedClass *klass)
                           FALSE,
                           G_PARAM_READABLE |
                           G_PARAM_STATIC_NICK);
+
+  g_object_class_install_properties (gobject_class,
+                                     PROP_LAST,
+                                     props);
 
   signals[SIGNAL_AUTHORIZE_METHOD] =
     g_signal_new ("authorize-method",
@@ -310,6 +335,7 @@ bolt_exported_base_finalize (gpointer g_class)
   g_hash_table_unref (priv->methods);
 
   g_clear_pointer (&priv->iface_name, g_free);
+  g_clear_pointer (&priv->object_path, g_free);
 }
 
 /* internal utility functions  */
@@ -388,6 +414,31 @@ bolt_exported_get_prop (BoltExported     *exported,
   return ret;
 }
 
+static char *
+bolt_exported_make_object_path (BoltExported *exported)
+{
+  g_autofree char *id = NULL;
+  BoltExportedClass *klass;
+  const char *base;
+
+  klass = BOLT_EXPORTED_GET_CLASS (exported);
+  base = klass->priv->object_path;
+
+  g_object_get (exported, "object-id", &id, NULL);
+
+  if (id)
+    g_strcanon (id, DBUS_OPATH_VALID_CHARS, '_');
+
+  if (base && id)
+    return g_build_path ("/", "/", base, id, NULL);
+  else if (base)
+    return g_build_path ("/", "/", base, NULL);
+  else if (id)
+    return g_build_path ("/", "/", id, NULL);
+
+  return g_strdup ("/");
+}
+
 /* dispatch helper function */
 
 typedef struct _DispatchData
@@ -437,7 +488,7 @@ dispach_property_setter (BoltExported          *exported,
 
   if (!ok && err != NULL)
     {
-      g_propagate_error (error, g_steal_pointer (&err));
+      bolt_error_propagate (error, &err);
       return NULL;
     }
   else if (!ok)
@@ -679,7 +730,7 @@ handle_dbus_get_property (GDBusConnection *connection,
   if (prop == NULL)
     {
       bolt_warn_err (err, LOG_TOPIC ("dbus"), "get_property");
-      g_propagate_error (error, g_steal_pointer (&err));
+      bolt_error_propagate (error, &err);
       return NULL;
     }
 
@@ -828,6 +879,12 @@ bolt_exported_class_set_interface_info (BoltExportedClass *klass,
   g_autoptr(GError) err = NULL;
   const char *xml;
 
+  g_return_if_fail (BOLT_IS_EXPORTED_CLASS (klass));
+  g_return_if_fail (klass->priv != NULL);
+  g_return_if_fail (klass->priv->node_info == NULL);
+  g_return_if_fail (iface_name != NULL);
+  g_return_if_fail (resource_name != NULL);
+
   bolt_exported_class_set_interface_name (klass, iface_name);
 
   data = g_resources_lookup_data (resource_name,
@@ -843,6 +900,19 @@ bolt_exported_class_set_interface_info (BoltExportedClass *klass,
 
   xml = g_bytes_get_data (data, NULL);
   bolt_exported_class_set_interface_info_from_xml (klass, xml);
+}
+
+void
+bolt_exported_class_set_object_path (BoltExportedClass *klass,
+                                     const char        *base_path)
+{
+  g_return_if_fail (BOLT_IS_EXPORTED_CLASS (klass));
+  g_return_if_fail (klass->priv != NULL);
+  g_return_if_fail (klass->priv->object_path == NULL);
+  g_return_if_fail (base_path != NULL);
+  g_return_if_fail (g_variant_is_object_path (base_path));
+
+  klass->priv->object_path = g_strdup (base_path);
 }
 
 void
@@ -863,6 +933,8 @@ bolt_exported_class_export_property (BoltExportedClass *klass,
       bolt_error (LOG_TOPIC ("dbus"), "klass not a BoltExportedClass");
       return;
     }
+
+  g_return_if_fail (G_IS_PARAM_SPEC (spec));
 
   priv = klass->priv;
 
@@ -909,6 +981,11 @@ bolt_exported_class_export_property (BoltExportedClass *klass,
       prop->flags_class = flags_spec->flags_class;
       conv = " [flags-auto-convert]";
     }
+  else if (is_str_prop && G_IS_PARAM_SPEC_OBJECT (prop->spec))
+    {
+      prop->object_conv = TRUE;
+      conv = " [object-auto-convert]";
+    }
 
   bolt_debug (LOG_TOPIC ("dbus"), "installed prop: %s -> %s%s",
               prop->name_bus, prop->name_obj,
@@ -923,6 +1000,7 @@ bolt_exported_class_export_properties (BoltExportedClass *klass,
                                        guint              n_pspecs,
                                        GParamSpec       **specs)
 {
+  g_return_if_fail (BOLT_IS_EXPORTED_CLASS (klass));
   g_return_if_fail (start > 0);
 
   for (guint i = start; i < n_pspecs; i++)
@@ -962,6 +1040,10 @@ bolt_exported_class_export_method (BoltExportedClass        *klass,
 {
   BoltExportedMethod *method;
 
+  g_return_if_fail (BOLT_IS_EXPORTED_CLASS (klass));
+  g_return_if_fail (name != NULL);
+  g_return_if_fail (handler != NULL);
+
   method = g_new0 (BoltExportedMethod, 1);
 
   method->name = g_strdup (name);
@@ -970,20 +1052,22 @@ bolt_exported_class_export_method (BoltExportedClass        *klass,
   g_hash_table_insert (klass->priv->methods, method->name, method);
 }
 
+
 /* public methods: instance */
 gboolean
 bolt_exported_export (BoltExported    *exported,
                       GDBusConnection *connection,
-                      const char      *object_path,
+                      const char      *path_hint,
                       GError         **error)
 {
+  g_autofree char *object_path = NULL;
   BoltExportedPrivate *priv;
   BoltExportedClass *klass;
   guint id;
 
   g_return_val_if_fail (BOLT_IS_EXPORTED (exported), FALSE);
   g_return_val_if_fail (connection != NULL, FALSE);
-  g_return_val_if_fail (object_path != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   priv = GET_PRIV (exported);
   klass = BOLT_EXPORTED_GET_CLASS (exported);
@@ -995,12 +1079,28 @@ bolt_exported_export (BoltExported    *exported,
       return FALSE;
     }
 
+  object_path = g_strdup (path_hint);
+
+  if (object_path == NULL)
+    {
+      object_path = bolt_exported_make_object_path (exported);
+      bolt_debug (LOG_TOPIC ("dbus"), "generated object path: %s",
+                  object_path);
+    }
+
+  if (object_path == NULL)
+    {
+      g_set_error_literal (error, BOLT_ERROR, BOLT_ERROR_FAILED,
+                           "object path empty for object");
+      return FALSE;
+    }
+
   id = g_dbus_connection_register_object (connection,
                                           object_path,
                                           klass->priv->iface_info,
                                           &dbus_vtable,
-                                          g_object_ref (exported),
-                                          g_object_unref,
+                                          exported,
+                                          NULL,
                                           error);
 
   if (id == 0)
@@ -1009,7 +1109,7 @@ bolt_exported_export (BoltExported    *exported,
   bolt_debug (LOG_TOPIC ("dbus"), "registered object at %s", object_path);
 
   priv->dbus = g_object_ref (connection);
-  priv->object_path = g_strdup (object_path);
+  priv->object_path = g_steal_pointer (&object_path);
   priv->registration = id;
 
   g_object_notify_by_pspec (G_OBJECT (exported), props[PROP_OBJECT_PATH]);
@@ -1049,6 +1149,18 @@ bolt_exported_unexport (BoltExported *exported)
   return ok;
 }
 
+gboolean
+bolt_exported_is_exported (BoltExported *exported)
+{
+  BoltExportedPrivate *priv;
+
+  g_return_val_if_fail (BOLT_IS_EXPORTED (exported), FALSE);
+
+  priv = GET_PRIV (exported);
+
+  return priv->registration > 0;
+}
+
 GDBusConnection *
 bolt_exported_get_connection (BoltExported *exported)
 {
@@ -1084,6 +1196,9 @@ bolt_exported_emit_signal (BoltExported *exported,
   gboolean ok;
 
   g_return_val_if_fail (BOLT_IS_EXPORTED (exported), FALSE);
+  g_return_val_if_fail (name != NULL, FALSE);
+  g_return_val_if_fail (parameters != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   priv = GET_PRIV (exported);
 
@@ -1105,7 +1220,7 @@ bolt_exported_emit_signal (BoltExported *exported,
     {
       bolt_warn_err (err, LOG_TOPIC ("dbus"),
                      "error emitting signal");
-      g_propagate_error (error, g_steal_pointer (&err));
+      bolt_error_propagate (error, &err);
     }
   else
     {
@@ -1134,8 +1249,6 @@ bolt_exported_prop_free (gpointer data)
   g_param_spec_unref (prop->spec);
   g_variant_type_free (prop->signature);
 
-
-
   g_free (prop);
 }
 
@@ -1143,26 +1256,23 @@ static GVariant *
 enum_gvalue_to_gvariant (GEnumClass   *enum_class,
                          const GValue *value)
 {
-  g_autofree char *str = NULL;
-  const char *name;
-  GEnumValue *ev;
+  g_autoptr(GError) err = NULL;
+  const char *str;
   GVariant *res;
   gint iv;
 
   iv = g_value_get_enum (value);
-  ev = g_enum_get_value (enum_class, iv);
+  str = bolt_enum_class_to_string (enum_class, iv, &err);
 
-  if (ev != NULL)
+  if (str == NULL)
     {
-      res = g_variant_new_string (ev->value_nick);
-      return g_variant_ref_sink (res);
+      bolt_bug ("auto-convert enum: %s", err->message);
+      res = g_variant_new_printf ("%d", iv);
     }
-
-  /* we got an invalid value for that enum */
-  str = g_strdup_printf ("%d", iv);
-  res = g_variant_new_string (str);
-  name = g_type_name_from_class ((GTypeClass *) enum_class);
-  bolt_bug ("invalid enum value %d for enum '%s'", iv, name);
+  else
+    {
+      res = g_variant_new_string (str);
+    }
 
   return g_variant_ref_sink (res);
 }
@@ -1173,28 +1283,18 @@ enum_gvariant_to_gvalue (GEnumClass *enum_class,
                          GValue     *value,
                          GError    **error)
 {
-  GEnumValue *ev = NULL;
   const char *str;
+  gboolean ok;
+  gint val;
 
   str = g_variant_get_string (variant, NULL);
 
-  if (str == NULL)
-    str = "invalid";
+  /* NB: it is ok to pass NULL here */
+  ok = bolt_enum_class_from_string (enum_class, str, &val, error);
 
-  ev = g_enum_get_value_by_nick (enum_class, str);
+  if (ok)
+    g_value_set_enum (value, val);
 
-  if (ev == NULL)
-    {
-      const char *name;
-
-      name = g_type_name_from_class ((GTypeClass *) enum_class);
-      g_set_error (error, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS,
-                   "invalid enum value '%s' for '%s'", str, name);
-
-      return FALSE;
-    }
-
-  g_value_set_enum (value, ev->value);
   return TRUE;
 }
 
@@ -1212,11 +1312,8 @@ flags_gvalue_to_gvariant (GFlagsClass  *flags_class,
   str = bolt_flags_class_to_string (flags_class, iv, &err);
   if (str == NULL)
     {
-      const char *name;
-
-      name = g_type_name_from_class ((GTypeClass *) flags_class);
+      bolt_bug ("auto-convert: %s", err->message);
       str = g_strdup_printf ("%u", iv);
-      bolt_bug ("invalid enum flags '%u' for enum '%s'", iv, name);
     }
 
   res = g_variant_new_string (str);
@@ -1229,27 +1326,48 @@ flags_gvariant_to_gvalue (GFlagsClass *flags_class,
                           GValue      *value,
                           GError     **error)
 {
-  gboolean ok;
   const char *str;
+  gboolean ok;
   guint flags;
 
   str = g_variant_get_string (variant, NULL);
 
-  if (str == NULL)
-    {
-      const char *name;
-
-      name = g_type_name_from_class ((GTypeClass *) flags_class);
-      g_set_error (error, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS,
-                   "invalid flags value (null) for '%s'", name);
-    }
-
+  /* NB: NULL is a safe value for 'str' to be passed into */
   ok = bolt_flags_class_from_string (flags_class, str, &flags, error);
 
   if (ok)
     g_value_set_flags (value, flags);
 
   return ok;
+}
+
+static GVariant *
+object_gvalue_to_gvariant (const GValue *value)
+{
+  g_autofree char *str = NULL;
+  GVariant *res;
+  GObject *obj;
+
+  obj = g_value_get_object (value);
+
+  if (obj)
+    g_object_get (obj, "object-id", &str, NULL);
+
+  if (str == NULL)
+    str = g_strdup ("");
+
+  res = g_variant_new_string (str);
+  return g_variant_ref_sink (res);
+}
+
+static gboolean
+object_gvariant_to_gvalue (GVariant    *variant G_GNUC_UNUSED,
+                           GValue      *value   G_GNUC_UNUSED,
+                           GError             **error)
+{
+  g_set_error_literal (error, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS,
+                       "can not set object property from string");
+  return FALSE;
 }
 
 static GVariant *
@@ -1260,6 +1378,8 @@ bolt_exported_prop_gvalue_to_gvariant (BoltExportedProp *prop,
     return enum_gvalue_to_gvariant (prop->enum_class, value);
   else if (prop->flags_class != NULL)
     return flags_gvalue_to_gvariant (prop->flags_class, value);
+  else if (prop->object_conv)
+    return object_gvalue_to_gvariant (value);
   else
     return g_dbus_gvalue_to_gvariant (value, prop->signature);
 }
@@ -1274,7 +1394,53 @@ bolt_exported_prop_gvariant_to_gvalue (BoltExportedProp *prop,
     return enum_gvariant_to_gvalue (prop->enum_class, variant, value, error);
   else if (prop->flags_class != NULL)
     return flags_gvariant_to_gvalue (prop->flags_class, variant, value, error);
+  else if (prop->object_conv)
+    return object_gvariant_to_gvalue (variant, value, error);
 
   g_dbus_gvariant_to_gvalue (variant, value);
+
   return TRUE;
+}
+
+GParamSpec *
+bolt_param_spec_override (GObjectClass *klass,
+                          const char   *name)
+{
+  GObjectClass *parent_class = NULL;
+  GParamSpec *base = NULL;
+  GType parent;
+  GType type;
+  guint n;
+
+  g_return_val_if_fail (G_IS_OBJECT_CLASS (klass), NULL);
+  g_return_val_if_fail (name != NULL, NULL);
+
+  type = G_OBJECT_CLASS_TYPE (klass);
+  parent = g_type_parent (type);
+
+  parent_class = g_type_class_peek (parent);
+  if (parent_class)
+    base = g_object_class_find_property (parent_class, name);
+
+  if (base == NULL)
+    {
+      g_autofree GType *ifaces = g_type_interfaces (type, &n);
+
+      while (n-- && base == NULL)
+        {
+          gpointer iface = g_type_default_interface_peek (ifaces[n]);
+
+          if (iface)
+            base = g_object_interface_find_property (iface, name);
+        }
+    }
+
+  if (base == NULL)
+    {
+      bolt_bug ("Could not override unknown property: '%s::%s'",
+                G_OBJECT_CLASS_NAME (klass), name);
+      return NULL;
+    }
+
+  return g_param_spec_override (name, base);
 }

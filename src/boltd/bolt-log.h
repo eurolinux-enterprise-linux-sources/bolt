@@ -34,8 +34,10 @@ G_BEGIN_DECLS
 
 #define LOG_DIRECT(k, v) "_" k, v
 #define LOG_DEV(device) "@device", device
+#define LOG_DOM(domain) "@domain", domain
 #define LOG_ERR(error) "@error", error
 #define LOG_TOPIC(topic) "@topic", topic
+#define LOG_DOM_UID(uid) LOG_DIRECT (BOLT_LOG_DOMAIN_UID, uid)
 #define LOG_DEV_UID(uid) LOG_DIRECT (BOLT_LOG_DEVICE_UID, uid)
 #define LOG_MSG_ID(msg_id) LOG_DIRECT ("MESSAGE_ID", msg_id)
 #define LOG_ID(id) LOG_MSG_ID (BOLT_LOG_MSG_ID_ ## id)
@@ -114,6 +116,10 @@ void               bolt_log (const char    *domain,
 
 /* consumer functions */
 
+const char *       bolt_log_level_to_priority (GLogLevelFlags log_level);
+
+const char *       bolt_log_level_to_string (GLogLevelFlags log_level);
+
 typedef struct _BoltLogCtx BoltLogCtx;
 
 BoltLogCtx *       bolt_log_ctx_acquire (const GLogField *fields,
@@ -126,6 +132,11 @@ void               bolt_log_ctx_free (BoltLogCtx *ctx);
 
 const char *       blot_log_ctx_get_domain (BoltLogCtx *ctx);
 
+void               bolt_log_fmt_journal (const BoltLogCtx *ctx,
+                                         GLogLevelFlags    log_level,
+                                         char             *message,
+                                         gsize             size);
+
 GLogWriterOutput   bolt_log_stdstream (const BoltLogCtx *ctx,
                                        GLogLevelFlags    log_level,
                                        guint             flags);
@@ -133,6 +144,8 @@ GLogWriterOutput   bolt_log_stdstream (const BoltLogCtx *ctx,
 GLogWriterOutput    bolt_log_journal (const BoltLogCtx *ctx,
                                       GLogLevelFlags    log_level,
                                       guint             flags);
+
+void               bolt_log_gen_id (char id[BOLT_LOG_MSG_IDLEN]);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (BoltLogCtx, bolt_log_ctx_free);
 

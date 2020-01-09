@@ -20,22 +20,52 @@
 
 #pragma once
 
-#include <gio/gio.h>
+#include "bolt-enums.h"
+#include "bolt-exported.h"
+#include "bolt-udev.h"
+
+#include <sys/types.h>
 
 G_BEGIN_DECLS
 
 /* forward declaration */
 struct udev;
 
-#define BOLT_TYPE_POWER bolt_power_get_type ()
-G_DECLARE_FINAL_TYPE (BoltPower, bolt_power, BOLT, POWER, GObject);
+/* BoltPowerGuard */
 
-BoltPower  *        bolt_power_new (struct udev *udev);
+#define BOLT_TYPE_POWER_GUARD bolt_power_guard_get_type ()
+G_DECLARE_FINAL_TYPE (BoltPowerGuard, bolt_power_guard, BOLT, POWER_GUARD, GObject);
+
+int                 bolt_power_guard_monitor (BoltPowerGuard *guard,
+                                              GError        **error);
+
+const char *        bolt_power_guard_get_id (BoltPowerGuard *guard);
+
+const char *        bolt_power_guard_get_who (BoltPowerGuard *guard);
+
+guint               bolt_power_guard_get_pid (BoltPowerGuard *guard);
+
+/* BoltPower */
+
+#define BOLT_TYPE_POWER bolt_power_get_type ()
+G_DECLARE_FINAL_TYPE (BoltPower, bolt_power, BOLT, POWER, BoltExported);
+
+BoltPower  *        bolt_power_new (BoltUdev *udev);
+
+GFile *             bolt_power_get_statedir (BoltPower *power);
 
 gboolean            bolt_power_can_force (BoltPower *power);
 
-gboolean            bolt_power_force_switch (BoltPower *power,
-                                             gboolean   on,
-                                             GError   **error);
+BoltPowerState      bolt_power_get_state (BoltPower *power);
+
+BoltPowerGuard *    bolt_power_acquire_full (BoltPower  *power,
+                                             const char *who,
+                                             pid_t       pid,
+                                             GError    **error);
+
+BoltPowerGuard *    bolt_power_acquire (BoltPower *power,
+                                        GError   **error);
+
+GList *             bolt_power_list_guards (BoltPower *power);
 
 G_END_DECLS

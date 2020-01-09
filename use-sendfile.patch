@@ -1,0 +1,35 @@
+From acda1b0d97fa9e2a3ea3a51619d30d7f2d0f7244 Mon Sep 17 00:00:00 2001
+From: Christian Kellner <christian@kellner.me>
+Date: Tue, 26 Mar 2019 17:52:28 +0100
+Subject: [PATCH] common: use sendfile instead of copy_file_range
+
+On older kernels we cannot use copy_file_range so use sendfile
+instead.
+---
+ common/bolt-io.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/common/bolt-io.c b/common/bolt-io.c
+index 5e50afa..375f978 100644
+--- a/common/bolt-io.c
++++ b/common/bolt-io.c
+@@ -26,6 +26,7 @@
+ #include <fcntl.h>
+ #include <errno.h>
+ #include <sys/types.h>
++#include <sys/sendfile.h>
+ #include <sys/stat.h>
+ #include <stdio.h>
+ #include <string.h>
+@@ -831,7 +832,7 @@ bolt_copy_bytes (int      fd_from,
+     {
+       ssize_t r;
+ 
+-      r = copy_file_range (fd_from, NULL, fd_to, NULL, len, 0);
++      r = sendfile (fd_to, fd_from, NULL, len);
+ 
+       if (r == -1)
+         {
+-- 
+2.20.1
+

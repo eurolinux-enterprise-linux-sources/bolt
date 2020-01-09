@@ -55,8 +55,16 @@ gboolean bolt_err_notfound (const GError *error);
 gboolean bolt_err_exists (const GError *error);
 gboolean bolt_err_inval (const GError *error);
 gboolean bolt_err_cancelled (const GError *error);
+gboolean bolt_err_badstate (const GError *error);
+gboolean bolt_err_nokey (const GError *error);
 
+gboolean bolt_error_propagate (GError **dest,
+                               GError **source);
 gboolean bolt_error_propagate_stripped (GError **dest,
                                         GError **source);
 
+gboolean bolt_error_for_errno (GError    **error,
+                               gint        err_no,
+                               const char *format,
+                               ...) G_GNUC_PRINTF (3, 4);
 G_END_DECLS

@@ -25,6 +25,9 @@
 
 /* logging */
 
+#define BOLT_LOG_DOMAIN_UID "BOLT_DOMAIN_UID"
+#define BOLT_LOG_DOMAIN_NAME "BOLT_DOMAIN_NAME"
+
 #define BOLT_LOG_DEVICE_UID "BOLT_DEVICE_UID"
 #define BOLT_LOG_DEVICE_NAME "BOLT_DEVICE_NAME"
 #define BOLT_LOG_DEVICE_STATE "BOLT_DEVICE_STATE"
@@ -39,6 +42,7 @@
 #define BOLT_LOG_BUG_MARK "BOLT_LOG_BUG"
 
 /* logging - message ids */
+#define BOLT_LOG_MSG_IDLEN 33
 #define BOLT_LOG_MSG_ID_STARTUP "dd11929c788e48bdbb6276fb5f26b08a"
 
 
@@ -46,6 +50,13 @@
 
 #define BOLT_DBUS_NAME "org.freedesktop.bolt"
 #define BOLT_DBUS_PATH "/org/freedesktop/bolt"
+#define BOLT_DBUS_PATH_DOMAINS BOLT_DBUS_PATH "/domains"
+#define BOLT_DBUS_PATH_DEVICES BOLT_DBUS_PATH "/devices"
 #define BOLT_DBUS_INTERFACE "org.freedesktop.bolt1.Manager"
 
 #define BOLT_DBUS_DEVICE_INTERFACE "org.freedesktop.bolt1.Device"
+#define BOLT_DBUS_DOMAIN_INTERFACE "org.freedesktop.bolt1.Domain"
+#define BOLT_DBUS_POWER_INTERFACE "org.freedesktop.bolt1.Power"
+
+/* other well known names */
+#define INTEL_WMI_THUNDERBOLT_GUID "86CCFD48-205E-4A77-9C48-2021CBEDE341"

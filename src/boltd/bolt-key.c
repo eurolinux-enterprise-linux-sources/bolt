@@ -177,6 +177,7 @@ bolt_key_write_to (BoltKey      *key,
   g_return_val_if_fail (BOLT_IS_KEY (key), FALSE);
   g_return_val_if_fail (fd > -1, FALSE);
   g_return_val_if_fail (level != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   *level = BOLT_SECURITY_USER;
 
@@ -187,7 +188,7 @@ bolt_key_write_to (BoltKey      *key,
   if (!ok && g_error_matches (err, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT))
     g_set_error_literal (error, BOLT_ERROR, BOLT_ERROR_BADKEY, "invalid key data");
   else if (!ok)
-    g_propagate_error (error, g_steal_pointer (&err));
+    bolt_error_propagate (error, &err);
   else if (!key->fresh) /* ok == True */
     *level = BOLT_SECURITY_SECURE;
 
@@ -220,6 +221,9 @@ bolt_key_load_file (GFile   *file,
   gsize len;
   int fd;
 
+  g_return_val_if_fail (G_IS_FILE (file), NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
+
   key = g_object_new (BOLT_TYPE_KEY, NULL);
   path = g_file_get_path (file);
 
@@ -231,15 +235,23 @@ bolt_key_load_file (GFile   *file,
   ok = bolt_read_all (fd, key->data, BOLT_KEY_CHARS, &len, error);
   close (fd);
 
+  if (!ok)
+    return NULL;
+
+  /* empty key; NB: the kernel gives us "\n" for an empty key */
+  if (len == 0 || (len == 1 && g_ascii_isspace (key->data[0])))
+    {
+      g_set_error_literal (error, BOLT_ERROR, BOLT_ERROR_NOKEY,
+                           "key-file exists but contains no data");
+      return NULL;
+    }
+
   if (len != BOLT_KEY_CHARS)
     {
       g_set_error (error, BOLT_ERROR, BOLT_ERROR_BADKEY,
                    "unexpected key size (corrupt key?): %zu", len);
       return NULL;
     }
-
-  if (!ok)
-    return NULL;
 
   key->fresh = FALSE;
 
@@ -251,6 +263,8 @@ bolt_key_get_state (BoltKey *key)
 {
   if (key == NULL)
     return BOLT_KEY_MISSING;
+
+  g_return_val_if_fail (BOLT_IS_KEY (key), BOLT_KEY_UNKNOWN);
 
   return key->fresh ? BOLT_KEY_NEW : BOLT_KEY_HAVE;
 }

@@ -32,9 +32,25 @@ void bolt_str_erase_clear (char **str);
 
 #define bolt_streq(s1, s2) (g_strcmp0 (s1, s2) == 0)
 
-GStrv   bolt_strv_from_ptr_array (GPtrArray **array);
+GStrv    bolt_strv_from_ptr_array (GPtrArray **array);
+gsize    bolt_strv_length (char * const *strv);
+char **  bolt_strv_contains (GStrv       haystack,
+                             const char *needle);
+gboolean bolt_strv_equal (const GStrv a,
+                          const GStrv b);
+
+GHashTable * bolt_strv_diff (const GStrv before,
+                             const GStrv after);
+
+char ** bolt_strv_rotate_left (char **strv);
+void    bolt_strv_permute (char **strv);
+
+#define  bolt_strv_isempty(strv) ((strv) == NULL || *(strv) == NULL)
+
+#define bolt_strzero(str) (str == NULL || *str == '\0')
 
 #define bolt_yesno(val) val ? "yes" : "no"
+#define bolt_okfail(val) (!!val) ? "ok" : "fail"
 
 char *bolt_strdup_validate (const char *string);
 
@@ -42,5 +58,34 @@ char *bolt_strstrip (char *string);
 
 gboolean bolt_str_parse_as_int (const char *str,
                                 gint       *ret);
+
+/* replacing string pointers, like g_set_object, g_set_error ... */
+static inline gboolean
+bolt_set_str (char **target, char *str)
+{
+  char *ptr;
+
+  g_return_val_if_fail (target != NULL, FALSE);
+
+  ptr = *target;
+
+  if (ptr == str)
+    return FALSE;
+
+  g_free (ptr);
+  *target = str;
+
+  return TRUE;
+}
+
+#define bolt_set_strdup(target, str) \
+  bolt_set_str (target, g_strdup (str))
+
+gboolean bolt_set_strdup_printf (char      **target,
+                                 const char *fmt,
+                                 ...) G_GNUC_PRINTF (2, 3);
+
+gint     bolt_comparefn_strcmp (gconstpointer a,
+                                gconstpointer b);
 
 G_END_DECLS

@@ -39,8 +39,10 @@ struct _BoltStore
   GObject object;
 
   GFile  *root;
+  GFile  *domains;
   GFile  *devices;
   GFile  *keys;
+  GFile  *times;
 };
 
 
@@ -74,14 +76,11 @@ bolt_store_finalize (GObject *object)
 {
   BoltStore *store = BOLT_STORE (object);
 
-  if (store->root)
-    g_clear_object (&store->root);
-
-  if (store->devices)
-    g_clear_object (&store->devices);
-
-  if (store->keys)
-    g_clear_object (&store->keys);
+  g_clear_object (&store->root);
+  g_clear_object (&store->domains);
+  g_clear_object (&store->devices);
+  g_clear_object (&store->keys);
+  g_clear_object (&store->times);
 
   G_OBJECT_CLASS (bolt_store_parent_class)->finalize (object);
 }
@@ -135,7 +134,9 @@ bolt_store_constructed (GObject *obj)
   BoltStore *store = BOLT_STORE (obj);
 
   store->devices = g_file_get_child (store->root, "devices");
+  store->domains = g_file_get_child (store->root, "domains");
   store->keys = g_file_get_child (store->root, "keys");
+  store->times = g_file_get_child (store->root, "times");
 }
 
 static void
@@ -183,7 +184,7 @@ bolt_store_class_init (BoltStoreClass *klass)
 }
 
 /* internal methods */
-
+#define DOMAIN_GROUP "domain"
 #define DEVICE_GROUP "device"
 #define USER_GROUP "user"
 
@@ -215,7 +216,8 @@ bolt_store_config_load (BoltStore *store,
   gboolean ok;
   gsize len;
 
-  g_return_val_if_fail (store != NULL, FALSE);
+  g_return_val_if_fail (store != NULL, NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
 
   sf = g_file_get_child (store->root, CFG_FILE);
   ok = g_file_load_contents (sf, NULL,
@@ -245,6 +247,10 @@ bolt_store_config_save (BoltStore *store,
   gboolean ok;
   gsize len;
 
+  g_return_val_if_fail (store != NULL, FALSE);
+  g_return_val_if_fail (config != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
   sf = g_file_get_child (store->root, CFG_FILE);
   data = g_key_file_to_data (config, &len, error);
 
@@ -262,8 +268,9 @@ bolt_store_config_save (BoltStore *store,
 }
 
 GStrv
-bolt_store_list_uids (BoltStore *store,
-                      GError   **error)
+bolt_store_list_uids (BoltStore  *store,
+                      const char *type,
+                      GError    **error)
 {
   g_autoptr(GError) err = NULL;
   g_autoptr(GDir) dir   = NULL;
@@ -271,16 +278,31 @@ bolt_store_list_uids (BoltStore *store,
   g_autoptr(GPtrArray) ids = NULL;
   const char *name;
 
+  g_return_val_if_fail (BOLT_IS_STORE (store), NULL);
+  g_return_val_if_fail (type != NULL, NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
+
+  if (bolt_streq (type, "devices"))
+    path = g_file_get_path (store->devices);
+  if (bolt_streq (type, "domains"))
+    path = g_file_get_path (store->domains);
+
+  if (path == NULL)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                   "unknown stored typed '%s'", type);
+      return NULL;
+    }
+
   ids = g_ptr_array_new ();
 
-  path = g_file_get_path (store->devices);
   dir = g_dir_open (path, 0, &err);
   if (dir == NULL)
     {
       if (bolt_err_notfound (err))
         return bolt_strv_from_ptr_array (&ids);
 
-      g_propagate_error (error, g_steal_pointer (&err));
+      bolt_error_propagate (error, &err);
       return NULL;
     }
 
@@ -296,6 +318,150 @@ bolt_store_list_uids (BoltStore *store,
 }
 
 gboolean
+bolt_store_put_domain (BoltStore  *store,
+                       BoltDomain *domain,
+                       GError    **error)
+{
+  g_autoptr(GError) err = NULL;
+  g_autoptr(GFile) entry = NULL;
+  g_autoptr(GKeyFile) kf = NULL;
+  g_autofree char *path = NULL;
+  char * const * bootacl = NULL;
+  const char *uid;
+  gboolean ok;
+  gsize len;
+
+  g_return_val_if_fail (BOLT_IS_STORE (store), FALSE);
+  g_return_val_if_fail (BOLT_IS_DOMAIN (domain), FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  uid = bolt_domain_get_uid (domain);
+  g_assert (uid);
+
+  entry = g_file_get_child (store->domains, uid);
+
+  ok = bolt_fs_make_parent_dirs (entry, error);
+  if (!ok)
+    return FALSE;
+
+  kf = g_key_file_new ();
+  path = g_file_get_path (entry);
+  ok = g_key_file_load_from_file (kf,
+                                  path,
+                                  G_KEY_FILE_KEEP_COMMENTS,
+                                  &err);
+
+  if (!ok && !bolt_err_notfound (err))
+    {
+      bolt_warn_err (err, LOG_TOPIC ("store"),
+                     "error loading existing domain");
+      g_clear_error (&err);
+      /* not fatal, keep going */
+    }
+
+  bootacl = bolt_domain_get_bootacl (domain);
+  len = bolt_strv_length (bootacl);
+
+  g_key_file_set_string_list (kf,
+                              DOMAIN_GROUP,
+                              "bootacl",
+                              (const char * const *) bootacl,
+                              len);
+
+  ok = g_key_file_save_to_file (kf, path, error);
+
+  if (!ok)
+    return FALSE;
+
+  g_object_set (G_OBJECT (domain),
+                "store", store,
+                NULL);
+
+  return ok;
+}
+
+BoltDomain *
+bolt_store_get_domain (BoltStore  *store,
+                       const char *uid,
+                       GError    **error)
+{
+  g_autoptr(GKeyFile) kf = NULL;
+  g_autoptr(GFile) db = NULL;
+  g_autoptr(GError) err = NULL;
+  g_autofree char *path = NULL;
+  g_auto(GStrv) bootacl = NULL;
+  BoltDomain *domain = NULL;
+  gboolean ok;
+
+  g_return_val_if_fail (store != NULL, NULL);
+  g_return_val_if_fail (uid != NULL, NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
+
+  db = g_file_get_child (store->domains, uid);
+  path = g_file_get_path (db);
+
+  kf = g_key_file_new ();
+  ok = g_key_file_load_from_file (kf, path, G_KEY_FILE_NONE, error);
+
+  if (!ok)
+    return NULL;
+
+  bootacl = g_key_file_get_string_list (kf,
+                                        DOMAIN_GROUP,
+                                        "bootacl",
+                                        NULL,
+                                        &err);
+
+  if (bootacl == NULL && !bolt_err_notfound (err))
+    {
+      bolt_warn_err (err, LOG_DOM_UID (uid), LOG_TOPIC ("store"),
+                     "failed to parse bootacl for domain '%s'",
+                     uid);
+
+      g_clear_error (&err);
+    }
+
+  if (bolt_strv_isempty (bootacl))
+    g_clear_pointer (&bootacl, g_strfreev);
+
+  domain = g_object_new (BOLT_TYPE_DOMAIN,
+                         "store", store,
+                         "uid", uid,
+                         "bootacl", bootacl,
+                         NULL);
+
+  return domain;
+}
+
+gboolean
+bolt_store_del_domain (BoltStore  *store,
+                       BoltDomain *domain,
+                       GError    **error)
+{
+  g_autoptr(GFile) path = NULL;
+  const char *uid;
+  gboolean ok;
+
+  g_return_val_if_fail (store != NULL, FALSE);
+  g_return_val_if_fail (domain != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  uid = bolt_domain_get_uid (domain);
+
+  path = g_file_get_child (store->domains, uid);
+  ok = g_file_delete (path, NULL, error);
+
+  if (!ok)
+    return FALSE;
+
+  g_object_set (domain,
+                "store", NULL,
+                NULL);
+
+  return TRUE;
+}
+
+gboolean
 bolt_store_put_device (BoltStore  *store,
                        BoltDevice *device,
                        BoltPolicy  policy,
@@ -304,17 +470,24 @@ bolt_store_put_device (BoltStore  *store,
 {
   g_autoptr(GFile) entry = NULL;
   g_autoptr(GKeyFile) kf = NULL;
-  g_autofree char *data  = NULL;
+  g_autoptr(GError) err = NULL;
+  g_autofree char *data = NULL;
+  g_autofree char *path = NULL;
   BoltDeviceType type;
   const char *uid;
   const char *label;
+  gboolean fresh;
   gboolean ok;
+  guint64 ctime;
+  guint64 atime;
   gint64 stime;
   gsize len;
   guint keystate = 0;
 
-  g_return_val_if_fail (store != NULL, FALSE);
-  g_return_val_if_fail (device != NULL, FALSE);
+  g_return_val_if_fail (BOLT_IS_STORE (store), FALSE);
+  g_return_val_if_fail (BOLT_IS_DEVICE (device), FALSE);
+  g_return_val_if_fail (key == NULL || BOLT_IS_KEY (key), FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   uid = bolt_device_get_uid (device);
   g_assert (uid);
@@ -326,6 +499,17 @@ bolt_store_put_device (BoltStore  *store,
     return FALSE;
 
   kf = g_key_file_new ();
+
+  path = g_file_get_path (entry);
+
+  ok = g_key_file_load_from_file (kf,
+                                  path,
+                                  G_KEY_FILE_KEEP_COMMENTS,
+                                  &err);
+
+  if (!ok && bolt_err_exists (err))
+    bolt_warn_err (err, LOG_TOPIC ("store"), LOG_DEV_UID (uid),
+                   "could not load previously stored device");
 
   g_key_file_set_string (kf, DEVICE_GROUP, "name", bolt_device_get_name (device));
   g_key_file_set_string (kf, DEVICE_GROUP, "vendor", bolt_device_get_vendor (device));
@@ -358,12 +542,9 @@ bolt_store_put_device (BoltStore  *store,
 
   if (key)
     {
-      g_autoptr(GError) err  = NULL;
-      g_autoptr(GFile) keypath = g_file_get_child (store->keys, uid);
-      ok = bolt_fs_make_parent_dirs (keypath, &err);
+      g_clear_error (&err);
 
-      if (ok)
-        ok = bolt_key_save_file (key, keypath, &err);
+      ok = bolt_store_put_key (store, uid, key, &err);
 
       if (!ok)
         bolt_warn_err (err, "failed to store key");
@@ -378,23 +559,35 @@ bolt_store_put_device (BoltStore  *store,
                                 NULL,
                                 NULL, error);
 
-  if (ok)
-    {
-      g_object_set (device,
-                    "store", store,
-                    "policy", policy,
-                    "key", keystate,
-                    "storetime", stime,
-                    NULL);
+  if (!ok)
+    return FALSE;
 
-      g_signal_emit (store, signals[SIGNAL_DEVICE_ADDED], 0, uid);
-    }
+  fresh = bolt_device_get_stored (device) == FALSE;
 
-  return ok;
+  g_object_set (device,
+                "store", store,
+                "policy", policy,
+                "key", keystate,
+                "storetime", stime,
+                NULL);
+
+  if (fresh)
+    g_signal_emit (store, signals[SIGNAL_DEVICE_ADDED], 0, uid);
+
+  ctime = bolt_device_get_conntime (device);
+  atime = bolt_device_get_authtime (device);
+
+  bolt_store_put_times (store, uid, NULL,
+                        "conntime", ctime,
+                        "authtime", atime,
+                        NULL);
+  return TRUE;
 }
 
 BoltDevice *
-bolt_store_get_device (BoltStore *store, const char *uid, GError **error)
+bolt_store_get_device (BoltStore  *store,
+                       const char *uid,
+                       GError    **error)
 {
   g_autoptr(GKeyFile) kf = NULL;
   g_autoptr(GFile) db = NULL;
@@ -410,10 +603,13 @@ bolt_store_get_device (BoltStore *store, const char *uid, GError **error)
   BoltKeyState key;
   gboolean ok;
   guint64 stime;
+  guint64 atime = 0;
+  guint64 ctime = 0;
   gsize len;
 
-  g_return_val_if_fail (store != NULL, FALSE);
-  g_return_val_if_fail (uid != NULL, FALSE);
+  g_return_val_if_fail (BOLT_IS_STORE (store), NULL);
+  g_return_val_if_fail (uid != NULL, NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
 
   db = g_file_get_child (store->devices, uid);
   ok = g_file_load_contents (db, NULL,
@@ -489,6 +685,12 @@ bolt_store_get_device (BoltStore *store, const char *uid, GError **error)
       return NULL;
     }
 
+  /* read timestamps, but failing is not fatal */
+  bolt_store_get_times (store, uid, NULL,
+                        "conntime", &ctime,
+                        "authtime", &atime,
+                        NULL);
+
   return g_object_new (BOLT_TYPE_DEVICE,
                        "uid", uid,
                        "name", name,
@@ -499,6 +701,8 @@ bolt_store_get_device (BoltStore *store, const char *uid, GError **error)
                        "policy", policy,
                        "key", key,
                        "storetime", stime,
+                       "conntime", ctime,
+                       "authtime", atime,
                        "label", label,
                        NULL);
 }
@@ -511,11 +715,257 @@ bolt_store_del_device (BoltStore  *store,
   g_autoptr(GFile) devpath = NULL;
   gboolean ok;
 
+  g_return_val_if_fail (BOLT_IS_STORE (store), FALSE);
+  g_return_val_if_fail (uid != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
   devpath = g_file_get_child (store->devices, uid);
   ok = g_file_delete (devpath, NULL, error);
 
   if (ok)
     g_signal_emit (store, signals[SIGNAL_DEVICE_REMOVED], 0, uid);
+
+  return ok;
+}
+
+gboolean
+bolt_store_get_time (BoltStore  *store,
+                     const char *uid,
+                     const char *timesel,
+                     guint64    *outval,
+                     GError    **error)
+{
+  g_autoptr(GFile) gf = NULL;
+  g_autoptr(GFileInfo) info = NULL;
+  g_autofree char *fn = NULL;
+  gboolean ok;
+
+  g_return_val_if_fail (BOLT_IS_STORE (store), FALSE);
+  g_return_val_if_fail (uid != NULL, FALSE);
+  g_return_val_if_fail (timesel != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  fn = g_strdup_printf ("%s.%s", uid, timesel);
+  gf = g_file_get_child (store->times, fn);
+
+  info = g_file_query_info (gf, "time::modified",
+                            G_FILE_QUERY_INFO_NONE,
+                            NULL, error);
+
+  ok = info != NULL;
+  if (ok && outval != NULL)
+    *outval = g_file_info_get_attribute_uint64 (info, "time::modified");
+
+  return ok;
+}
+
+gboolean
+bolt_store_get_times (BoltStore  *store,
+                      const char *uid,
+                      GError    **error,
+                      ...)
+{
+  gboolean res = TRUE;
+  gboolean ok = TRUE;
+  const char *ts;
+  va_list args;
+
+  g_return_val_if_fail (BOLT_IS_STORE (store), FALSE);
+  g_return_val_if_fail (uid != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  va_start (args, error);
+  while ((ts = va_arg (args, const char *)) != NULL)
+    {
+      g_autoptr(GError) err = NULL;
+      guint64 *val = va_arg (args, guint64 *);
+
+      *val = 0;
+      ok = bolt_store_get_time (store, uid, ts, val, &err);
+
+      if (!ok && !bolt_err_notfound (err))
+        {
+          if (error != NULL)
+            {
+              res = bolt_error_propagate (error, &err);
+              break;
+            }
+
+          /* error variable NULL, caller doesn't care, we keep going */
+          bolt_warn_err (err, LOG_DEV_UID (uid), LOG_TOPIC ("store"),
+                         "failed to read timestamp '%s'", ts);
+        }
+    }
+  va_end (args);
+
+  return res;
+}
+
+gboolean
+bolt_store_put_time (BoltStore  *store,
+                     const char *uid,
+                     const char *timesel,
+                     guint64     val,
+                     GError    **error)
+{
+  g_autoptr(GFile) gf = NULL;
+  g_autofree char *fn = NULL;
+  gboolean ok;
+
+  g_return_val_if_fail (BOLT_IS_STORE (store), FALSE);
+  g_return_val_if_fail (uid != NULL, FALSE);
+  g_return_val_if_fail (timesel != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  fn = g_strdup_printf ("%s.%s", uid, timesel);
+  gf = g_file_get_child (store->times, fn);
+
+  ok = bolt_fs_make_parent_dirs (gf, error);
+  if (!ok)
+    return FALSE;
+
+  ok = bolt_fs_touch (gf, val, val, error);
+
+  return ok;
+}
+
+gboolean
+bolt_store_put_times (BoltStore  *store,
+                      const char *uid,
+                      GError    **error,
+                      ...)
+{
+  gboolean res = TRUE;
+  gboolean ok = TRUE;
+  const char *ts;
+  va_list args;
+
+  if (store == NULL)
+    {
+      g_set_error (error, BOLT_ERROR, BOLT_ERROR_FAILED,
+                   "device '%s' is not stored", uid);
+      return FALSE;
+    }
+
+  g_return_val_if_fail (BOLT_IS_STORE (store), FALSE);
+  g_return_val_if_fail (uid != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  va_start (args, error);
+  while ((ts = va_arg (args, const char *)) != NULL)
+    {
+      g_autoptr(GError) err = NULL;
+      guint64 val = va_arg (args, guint64);
+
+      if (val == 0)
+        continue;
+
+      ok = bolt_store_put_time (store,
+                                uid,
+                                ts,
+                                val,
+                                &err);
+
+      if (!ok)
+        {
+          if (error != NULL)
+            {
+              res = bolt_error_propagate (error, &err);
+              break;
+            }
+
+          /* error variable NULL, caller doesn't care, we keep going */
+          bolt_warn_err (err, LOG_DEV_UID (uid), LOG_TOPIC ("store"),
+                         "failed to update timestamp '%s'", ts);
+        }
+    }
+  va_end (args);
+
+  return res;
+}
+
+gboolean
+bolt_store_del_time (BoltStore  *store,
+                     const char *uid,
+                     const char *timesel,
+                     GError    **error)
+{
+  g_autoptr(GFile) pathfile = NULL;
+  g_autofree char *name = NULL;
+  gboolean ok;
+
+  g_return_val_if_fail (BOLT_IS_STORE (store), FALSE);
+  g_return_val_if_fail (uid != NULL, FALSE);
+  g_return_val_if_fail (timesel != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  name = g_strdup_printf ("%s.%s", uid, timesel);
+  pathfile = g_file_get_child (store->times, name);
+  ok = g_file_delete (pathfile, NULL, error);
+
+  return ok;
+}
+
+gboolean
+bolt_store_del_times (BoltStore  *store,
+                      const char *uid,
+                      GError    **error,
+                      ...)
+{
+  gboolean res = TRUE;
+  gboolean ok = TRUE;
+  const char *ts;
+  va_list args;
+
+  g_return_val_if_fail (BOLT_IS_STORE (store), FALSE);
+  g_return_val_if_fail (uid != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  va_start (args, error);
+  while ((ts = va_arg (args, const char *)) != NULL)
+    {
+      g_autoptr(GError) err = NULL;
+
+      ok = bolt_store_del_time (store, uid, ts, &err);
+
+      if (!ok && !bolt_err_notfound (err))
+        {
+          if (error != NULL)
+            {
+              res = bolt_error_propagate (error, &err);
+              break;
+            }
+
+          /* error variable NULL, caller doesn't care, we keep going */
+          bolt_warn_err (err, LOG_DEV_UID (uid), LOG_TOPIC ("store"),
+                         "failed to delete timestamp '%s'", ts);
+        }
+    }
+  va_end (args);
+
+  return res;
+}
+
+
+gboolean
+bolt_store_put_key (BoltStore  *store,
+                    const char *uid,
+                    BoltKey    *key,
+                    GError    **error)
+{
+  g_autoptr(GFile) keypath = NULL;
+  gboolean ok;
+
+  g_return_val_if_fail (BOLT_IS_STORE (store), FALSE);
+  g_return_val_if_fail (uid != NULL, FALSE);
+  g_return_val_if_fail (BOLT_IS_KEY (key), FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  keypath = g_file_get_child (store->keys, uid);
+  ok = bolt_fs_make_parent_dirs (keypath, error);
+
+  if (ok)
+    ok = bolt_key_save_file (key, keypath, error);
 
   return ok;
 }
@@ -528,6 +978,9 @@ bolt_store_have_key (BoltStore  *store,
   g_autoptr(GFile) keypath = NULL;
   g_autoptr(GError) err = NULL;
   guint key = BOLT_KEY_MISSING;
+
+  g_return_val_if_fail (BOLT_IS_STORE (store), key);
+  g_return_val_if_fail (uid != NULL, key);
 
   keypath = g_file_get_child (store->keys, uid);
   keyinfo = g_file_query_info (keypath, "standard::*", 0, NULL, &err);
@@ -547,6 +1000,10 @@ bolt_store_get_key (BoltStore  *store,
 {
   g_autoptr(GFile) keypath = NULL;
 
+  g_return_val_if_fail (BOLT_IS_STORE (store), NULL);
+  g_return_val_if_fail (uid != NULL, NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
+
   keypath = g_file_get_child (store->keys, uid);
 
   return bolt_key_load_file (keypath, error);
@@ -559,6 +1016,10 @@ bolt_store_del_key (BoltStore  *store,
 {
   g_autoptr(GFile) keypath = NULL;
   gboolean ok;
+
+  g_return_val_if_fail (BOLT_IS_STORE (store), FALSE);
+  g_return_val_if_fail (uid != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   keypath = g_file_get_child (store->keys, uid);
   ok = g_file_delete (keypath, NULL, error);
@@ -575,8 +1036,9 @@ bolt_store_del (BoltStore  *store,
   const char *uid;
   gboolean ok;
 
-  g_return_val_if_fail (store != NULL, FALSE);
-  g_return_val_if_fail (dev != NULL, FALSE);
+  g_return_val_if_fail (BOLT_IS_STORE (store), FALSE);
+  g_return_val_if_fail (BOLT_IS_DEVICE (dev), FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   uid = bolt_device_get_uid (dev);
 
@@ -591,14 +1053,39 @@ bolt_store_del (BoltStore  *store,
 
   ok = bolt_store_del_device (store, uid, error);
 
-  if (ok)
-    {
-      g_object_set (dev,
-                    "store", NULL,
-                    "key", BOLT_KEY_MISSING,
-                    "policy", BOLT_POLICY_DEFAULT,
-                    NULL);
-    }
+  if (!ok)
+    return FALSE;
+
+  bolt_store_del_times (store, uid, NULL,
+                        "conntime", "authtime",
+                        NULL);
+
+  g_object_set (dev,
+                "store", NULL,
+                "key", BOLT_KEY_MISSING,
+                "policy", BOLT_POLICY_DEFAULT,
+                NULL);
 
   return ok;
+}
+
+BoltJournal *
+bolt_store_open_journal (BoltStore  *store,
+                         const char *type,
+                         const char *name,
+                         GError    **error)
+{
+  g_autoptr(GFile) root = NULL;
+  BoltJournal *journal;
+
+  g_return_val_if_fail (store != NULL, NULL);
+  g_return_val_if_fail (type != NULL, NULL);
+  g_return_val_if_fail (name != NULL, NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
+
+  root = g_file_get_child (store->root, type);
+
+  journal = bolt_journal_new (root, name, error);
+
+  return journal;
 }

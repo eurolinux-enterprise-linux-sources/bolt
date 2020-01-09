@@ -49,6 +49,7 @@ struct _BoltExportedClass
                                   gboolean               setting,
                                   GDBusMethodInvocation *invocation,
                                   GError               **error);
+
   /* for the future */
   gpointer padding[10];
 };
@@ -74,6 +75,9 @@ void     bolt_exported_class_set_interface_info (BoltExportedClass *klass,
                                                  const char        *iface_name,
                                                  const char        *resource_name);
 
+void     bolt_exported_class_set_object_path (BoltExportedClass *klass,
+                                              const char        *base_path);
+
 void     bolt_exported_class_export_property (BoltExportedClass *klass,
                                               GParamSpec        *spec);
 
@@ -98,6 +102,8 @@ gboolean           bolt_exported_export (BoltExported    *exported,
 
 gboolean           bolt_exported_unexport (BoltExported *exported);
 
+gboolean           bolt_exported_is_exported (BoltExported *exported);
+
 GDBusConnection *  bolt_exported_get_connection (BoltExported *exported);
 
 const char *       bolt_exported_get_object_path (BoltExported *exported);
@@ -108,5 +114,9 @@ gboolean           bolt_exported_emit_signal (BoltExported *exported,
                                               GError      **error);
 
 void               bolt_exported_flush (BoltExported *exported);
+
+/* helper methods */
+GParamSpec *       bolt_param_spec_override (GObjectClass *object_class,
+                                             const char   *name);
 
 G_END_DECLS

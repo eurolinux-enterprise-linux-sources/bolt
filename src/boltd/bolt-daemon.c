@@ -28,11 +28,12 @@
 
 #include "bolt-daemon-resource.h"
 
-#include <systemd/sd-id128.h>
-
+#include <glib-unix.h>
 #include <gio/gio.h>
 
+#include <errno.h>
 #include <locale.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -40,10 +41,45 @@
 static BoltManager *manager = NULL;
 static GMainLoop *main_loop = NULL;
 static guint name_owner_id = 0;
+static guint sigterm_id = 0;
+
+
+static gboolean
+handle_sigterm (gpointer user_data)
+{
+  bolt_debug (LOG_TOPIC ("signal"), "got SIGTERM; shutting down...");
+
+  if (g_main_loop_is_running (main_loop))
+    g_main_loop_quit (main_loop);
+
+  sigterm_id = 0;
+  return G_SOURCE_REMOVE;
+}
+
+static void
+install_signal_hanlder (void)
+{
+  g_autoptr(GSource) source = NULL;
+
+  source = g_unix_signal_source_new (SIGTERM);
+
+  if (source == NULL)
+    {
+      bolt_warn (LOG_TOPIC ("signal"), "failed installing SIGTERM hanlder: %s",
+                 g_strerror (errno));
+      return;
+    }
+
+  g_source_set_callback (source, handle_sigterm, NULL, NULL);
+  sigterm_id = g_source_attach (source, NULL);
+  bolt_debug (LOG_TOPIC ("signal"), "SIGTERM handler installed [%u]",
+              sigterm_id);
+}
 
 typedef struct _LogCfg
 {
   gboolean debug;
+  gboolean journal;
   char     session_id[33];
 } LogCfg;
 
@@ -80,7 +116,7 @@ daemon_logger (GLogLevelFlags   level,
   if (fileno (stderr) < 0)
     return G_LOG_WRITER_UNHANDLED;
 
-  if (g_log_writer_is_journald (fileno (stderr)))
+  if (log->journal || g_log_writer_is_journald (fileno (stderr)))
     res = bolt_log_journal (ctx, level, 0);
 
   if (res == G_LOG_WRITER_UNHANDLED)
@@ -129,30 +165,31 @@ on_name_lost (GDBusConnection *connection,
 {
   bolt_debug (LOG_TOPIC ("dbus"), "name lost; shutting down...");
 
-  g_clear_object (&manager);
-  g_bus_unown_name (name_owner_id);
-  g_main_loop_quit (main_loop);
+  if (g_main_loop_is_running (main_loop))
+    g_main_loop_quit (main_loop);
 }
 
 int
 main (int argc, char **argv)
 {
+  g_autoptr(GOptionContext) context = NULL;
   g_autoptr(GError) error = NULL;
-  GOptionContext *context;
   gboolean replace = FALSE;
   gboolean show_version = FALSE;
   gboolean session_bus = FALSE;
   GBusType bus_type = G_BUS_TYPE_SYSTEM;
   GBusNameOwnerFlags flags;
-  LogCfg log = { FALSE, };
-  sd_id128_t logid;
+  LogCfg log = { FALSE, FALSE, };
   const GOptionEntry options[] = {
     { "replace", 'r', 0, G_OPTION_ARG_NONE, &replace,  "Replace old daemon.", NULL },
     { "session-bus", 0, 0, G_OPTION_ARG_NONE, &session_bus, "Use the session bus.", NULL},
     { "verbose", 'v', 0, G_OPTION_ARG_NONE, &log.debug,  "Enable debug output.", NULL },
+    { "journal", 0, 0, G_OPTION_ARG_NONE, &log.journal, "Force logging to the journal.", NULL},
     { "version", 0, 0, G_OPTION_ARG_NONE, &show_version, "Print daemon version.", NULL},
     { NULL }
   };
+
+  install_signal_hanlder ();
 
   setlocale (LC_ALL, "");
   g_setenv ("GIO_USE_VFS", "local", TRUE);
@@ -189,14 +226,15 @@ main (int argc, char **argv)
       log.debug = bolt_streq (domains, "all");
     }
 
-  sd_id128_randomize (&logid);
-  sd_id128_to_string (logid, log.session_id);
+  bolt_log_gen_id (log.session_id);
 
   g_resources_register (bolt_daemon_get_resource ());
 
   bolt_msg (LOG_DIRECT (BOLT_LOG_VERSION, PACKAGE_VERSION),
             LOG_ID (STARTUP),
             PACKAGE_NAME " " PACKAGE_VERSION " starting up.");
+
+  bolt_debug ("session id is %s", log.session_id);
 
   /* hop on the bus, Gus */
   flags = G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT;
@@ -220,6 +258,17 @@ main (int argc, char **argv)
 
   /* When all is said and done, more is said then done.  */
   g_main_loop_unref (main_loop);
+
+  /* we are shutting down */
+  if (name_owner_id > 0)
+    {
+      g_bus_unown_name (name_owner_id);
+      name_owner_id = 0;
+    }
+
+  g_clear_object (&manager);
+
+  bolt_debug ("shutdown complete");
 
   return EXIT_SUCCESS;
 }

@@ -22,6 +22,8 @@
 
 #include "bolt-enums.h"
 #include "bolt-device.h"
+#include "bolt-domain.h"
+#include "bolt-power.h"
 #include "bolt-proxy.h"
 
 G_BEGIN_DECLS
@@ -36,6 +38,10 @@ void            bolt_client_new_async (GCancellable       *cancellable,
                                        gpointer            user_data);
 BoltClient *    bolt_client_new_finish (GAsyncResult *res,
                                         GError      **error);
+
+GPtrArray *     bolt_client_list_domains (BoltClient   *client,
+                                          GCancellable *cancellable,
+                                          GError      **error);
 
 GPtrArray *     bolt_client_list_devices (BoltClient   *client,
                                           GCancellable *cancellable,
@@ -79,14 +85,22 @@ gboolean        bolt_client_forget_device_finish (BoltClient   *client,
                                                   GAsyncResult *res,
                                                   GError      **error);
 
+BoltPower *     bolt_client_new_power_client (BoltClient   *client,
+                                              GCancellable *cancellable,
+                                              GError      **error);
+
 /* getter */
 guint           bolt_client_get_version (BoltClient *client);
 
 gboolean        bolt_client_is_probing (BoltClient *client);
 
+BoltPolicy      bolt_client_get_policy (BoltClient *client);
+
 BoltSecurity    bolt_client_get_security (BoltClient *client);
 
 BoltAuthMode    bolt_client_get_authmode (BoltClient *client);
+
+BoltPowerState  bolt_client_get_power_state (BoltClient *client);
 
 /* setter */
 

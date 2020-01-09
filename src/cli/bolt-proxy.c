@@ -269,6 +269,8 @@ bolt_proxy_get_cached_property (BoltProxy  *proxy,
   GVariant *var;
 
   g_return_val_if_fail (BOLT_IS_PROXY (proxy), NULL);
+  g_return_val_if_fail (name != NULL, NULL);
+
   pspec = g_object_class_find_property (G_OBJECT_GET_CLASS (proxy), name);
 
   if (pspec == NULL)
@@ -440,6 +442,21 @@ bolt_proxy_get_property_string (BoltProxy  *proxy,
 
   if (val && *val == '\0')
     val = NULL;
+
+  return val;
+}
+
+char **
+bolt_proxy_get_property_strv (BoltProxy  *proxy,
+                              const char *name)
+{
+  g_autoptr(GVariant) var = NULL;
+  char **val = NULL;
+
+  var = bolt_proxy_get_cached_property (proxy, name);
+
+  if (var != NULL)
+    val = g_variant_dup_strv (var, NULL);
 
   return val;
 }

@@ -20,9 +20,13 @@
 
 #include "config.h"
 
+#include "boltctl-cmds.h"
+#include "boltctl-uidfmt.h"
+
 #include "bolt-client.h"
 #include "bolt-enums.h"
 #include "bolt-error.h"
+#include "bolt-macros.h"
 #include "bolt-str.h"
 #include "bolt-term.h"
 #include "bolt-time.h"
@@ -32,12 +36,13 @@
 #include <locale.h>
 #include <stdlib.h>
 
-static int
+int
 usage_error (GError *error)
 {
   g_printerr ("%s:", g_get_application_name ());
   g_printerr ("%s error: %s", bolt_color (ANSI_RED), bolt_color (ANSI_NORMAL));
-  g_printerr ("%s", error->message);
+  if (error)
+    g_printerr ("%s", error->message);
   g_printerr ("\n");
   g_printerr ("Try \"%s --help\" for more information.", g_get_prgname ());
   g_printerr ("\n");
@@ -45,7 +50,7 @@ usage_error (GError *error)
   return EXIT_FAILURE;
 }
 
-static int
+int
 usage_error_need_arg (const char *arg)
 {
   g_autoptr(GError) error = NULL;
@@ -55,16 +60,52 @@ usage_error_need_arg (const char *arg)
   return usage_error (error);
 }
 
-static void
+int
+usage_error_too_many_args (void)
+{
+  g_autoptr(GError) error = NULL;
+
+  g_set_error (&error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+               "too many arguments");
+  return usage_error (error);
+}
+
+
+/* device related commands */
+static gboolean
+format_timestamp (BoltDevice *dev,
+                  char       *buffer,
+                  gsize       n,
+                  const char *timesel)
+{
+  g_autofree char *str = NULL;
+  guint64 ts;
+
+  g_object_get (dev, timesel, &ts, NULL);
+
+  if (ts > 0)
+    {
+      str = bolt_epoch_format (ts, "%c");
+      g_utf8_strncpy (buffer, str, n);
+    }
+  else
+    {
+      g_utf8_strncpy (buffer, "no", n);
+    }
+
+  return ts > 0;
+}
+
+void
 print_device (BoltDevice *dev, gboolean verbose)
 {
+  g_autofree char *label = NULL;
   const char *path;
   const char *uid;
   const char *name;
   const char *vendor;
   const char *syspath;
   const char *parent;
-  const char *label;
   BoltDeviceType type;
   BoltStatus status;
   BoltAuthFlags aflags;
@@ -79,7 +120,7 @@ print_device (BoltDevice *dev, gboolean verbose)
   const char *tree_space;
   gboolean stored;
   gboolean pcie;
-  guint64 ct, at, st;
+  char buf[256];
 
   path = g_dbus_proxy_get_object_path (G_DBUS_PROXY (dev));
   uid = bolt_device_get_uid (dev);
@@ -90,12 +131,9 @@ print_device (BoltDevice *dev, gboolean verbose)
   aflags = bolt_device_get_authflags (dev);
   parent = bolt_device_get_parent (dev);
   syspath = bolt_device_get_syspath (dev);
-  ct = bolt_device_get_conntime (dev);
-  at = bolt_device_get_authtime (dev);
   stored = bolt_device_is_stored (dev);
   policy = bolt_device_get_policy (dev);
   keystate = bolt_device_get_keystate (dev);
-  st = bolt_device_get_storetime (dev);
 
   pcie = bolt_flag_isclear (aflags, BOLT_AUTH_NOPCIE);
 
@@ -162,23 +200,21 @@ print_device (BoltDevice *dev, gboolean verbose)
   g_print ("   %s type:          %s\n", tree_branch, type_text);
   g_print ("   %s name:          %s\n", tree_branch, name);
   g_print ("   %s vendor:        %s\n", tree_branch, vendor);
-  g_print ("   %s uuid:          %s\n", tree_branch, uid);
+  g_print ("   %s uuid:          %s\n", tree_branch, format_uid (uid));
   if (verbose)
     g_print ("   %s dbus path:     %s\n", tree_branch, path);
   g_print ("   %s status:        %s\n", tree_branch, status_text);
 
   if (bolt_status_is_connected (status))
     {
-      g_autofree char *ctstr = NULL;
       g_autofree char *flags = NULL;
+      const char *domain;
 
-      flags = bolt_flags_to_string (BOLT_TYPE_AUTH_FLAGS, aflags, NULL);
-      g_print ("   %s %s authflags:  %s\n",
+      domain = bolt_device_get_domain (dev);
+      g_print ("   %s %s domain:     %s\n",
                bolt_glyph (TREE_VERTICAL),
                tree_branch,
-               flags);
-
-      ctstr = bolt_epoch_format (ct, "%c");
+               domain);
 
       if (verbose)
         {
@@ -192,29 +228,24 @@ print_device (BoltDevice *dev, gboolean verbose)
                    syspath);
         }
 
-      if (bolt_status_is_authorized (status))
-        {
-          g_autofree char *atstr = NULL;
-
-          atstr = bolt_epoch_format (at, "%c");
-          g_print ("   %s %s authorized: %s\n",
-                   bolt_glyph (TREE_VERTICAL),
-                   tree_branch,
-                   atstr);
-        }
-
-      g_print ("   %s %s connected:  %s\n",
+      flags = bolt_flags_to_string (BOLT_TYPE_AUTH_FLAGS, aflags, NULL);
+      g_print ("   %s %s authflags:  %s\n",
                bolt_glyph (TREE_VERTICAL),
                tree_right,
-               ctstr);
-
+               flags);
     }
 
-  g_print ("   %s stored:        %s\n", tree_right, bolt_yesno (stored));
+  if (format_timestamp (dev, buf, sizeof (buf), "authtime"))
+    g_print ("   %s authorized:    %s\n", tree_branch, buf);
+
+  if (format_timestamp (dev, buf, sizeof (buf), "conntime"))
+    g_print ("   %s connected:     %s\n", tree_branch, buf);
+
+  format_timestamp (dev, buf, sizeof (buf), "storetime");
+  g_print ("   %s stored:        %s\n", tree_right, buf);
 
   if (stored)
     {
-      g_autofree char *etstr = NULL;
       const char *pstr = bolt_policy_to_string (policy);
       const char *kstr;
 
@@ -227,9 +258,6 @@ print_device (BoltDevice *dev, gboolean verbose)
       else
         kstr = "unknown";
 
-      etstr = bolt_epoch_format (st, "%c");
-
-      g_print ("   %s %s when:       %s\n", tree_space, tree_branch, etstr);
       g_print ("   %s %s policy:     %s\n", tree_space, tree_branch, pstr);
       g_print ("   %s %s key:        %s\n", tree_space, tree_right, kstr);
 
@@ -238,364 +266,6 @@ print_device (BoltDevice *dev, gboolean verbose)
   g_print ("\n");
 }
 
-static int
-authorize (BoltClient *client, int argc, char **argv)
-{
-  g_autoptr(GOptionContext) optctx = NULL;
-  g_autoptr(BoltDevice) dev = NULL;
-  g_autoptr(GError) error = NULL;
-  BoltAuthCtrl flags = BOLT_AUTHCTRL_NONE;
-  const char *uid;
-  gboolean ok;
-
-  optctx = g_option_context_new ("DEVICE - Authorize a device");
-
-  if (!g_option_context_parse (optctx, &argc, &argv, &error))
-    return usage_error (error);
-
-  if (argc < 2)
-    return usage_error_need_arg ("DEVICE");
-
-  uid = argv[1];
-
-  dev = bolt_client_get_device (client, uid, NULL, &error);
-  if (dev == NULL)
-    {
-      g_printerr ("%s\n", error->message);
-      return EXIT_FAILURE;
-    }
-
-  ok = bolt_device_authorize (dev, flags, NULL, &error);
-  if (!ok)
-    g_printerr ("Authorization error: %s\n", error->message);
-
-  return ok ? EXIT_SUCCESS : EXIT_FAILURE;
-}
-
-
-static int
-enroll (BoltClient *client, int argc, char **argv)
-{
-  g_autoptr(GOptionContext) optctx = NULL;
-  g_autoptr(BoltDevice) dev = NULL;
-  g_autoptr(GError) error = NULL;
-  const char *uid;
-  BoltPolicy policy = BOLT_POLICY_DEFAULT;
-  BoltAuthCtrl flags = BOLT_AUTHCTRL_NONE;
-  const char *policy_arg = "default";
-  GOptionEntry options[] = {
-    { "policy", 0, 0, G_OPTION_ARG_STRING, &policy_arg, "Policy for the device; one of {auto, manual, *default}", "POLICY" },
-    { NULL }
-  };
-
-  optctx = g_option_context_new ("DEVICE - Authorize and store a device in the database");
-  g_option_context_add_main_entries (optctx, options, NULL);
-
-  if (!g_option_context_parse (optctx, &argc, &argv, &error))
-    return usage_error (error);
-
-  if (argc < 2)
-    return usage_error_need_arg ("DEVICE");
-
-  policy = bolt_policy_from_string (policy_arg);
-
-  if (!bolt_policy_validate (policy))
-    {
-      g_set_error (&error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                   "invalid policy '%s'", policy_arg);
-      return usage_error (error);
-    }
-
-  uid = argv[1];
-
-  dev = bolt_client_enroll_device (client, uid, policy, flags, &error);
-  if (dev == NULL)
-    {
-      g_printerr ("%s\n", error->message);
-      return EXIT_FAILURE;
-    }
-
-  print_device (dev, TRUE);
-  return EXIT_SUCCESS;
-}
-
-static int
-forget (BoltClient *client, int argc, char **argv)
-{
-  g_autoptr(GOptionContext) optctx = NULL;
-  g_autoptr(GError) error = NULL;
-  const char *uid;
-  gboolean ok;
-
-  optctx = g_option_context_new ("DEVICE - Remove a device form the store");
-
-  if (!g_option_context_parse (optctx, &argc, &argv, &error))
-    return usage_error (error);
-
-  if (argc < 2)
-    return usage_error_need_arg ("DEVICE");
-
-  uid = argv[1];
-
-  ok = bolt_client_forget_device (client, uid, &error);
-  if (!ok)
-    g_printerr ("Failed to forget device: %s\n", error->message);
-
-  return ok ? EXIT_SUCCESS : EXIT_FAILURE;
-}
-
-
-static int
-info (BoltClient *client, int argc, char **argv)
-{
-  g_autoptr(GOptionContext) optctx = NULL;
-  g_autoptr(BoltDevice) dev = NULL;
-  g_autoptr(GError) error = NULL;
-  const char *uid;
-
-  optctx = g_option_context_new ("DEVICE - Show information about a device");
-
-  if (!g_option_context_parse (optctx, &argc, &argv, &error))
-    return usage_error (error);
-
-  if (argc < 2)
-    return usage_error_need_arg ("DEVICE");
-
-  uid = argv[1];
-
-  dev = bolt_client_get_device (client, uid, NULL, &error);
-  if (dev == NULL)
-    {
-      g_printerr ("%s\n", error->message);
-      return EXIT_FAILURE;
-    }
-
-  print_device (dev, TRUE);
-  return EXIT_SUCCESS;
-}
-
-static void
-handle_device_changed (GObject    *gobject,
-                       GParamSpec *pspec,
-                       gpointer    user_data)
-{
-  const char *uid = NULL;
-  const char *dev_name = NULL;
-  g_autofree char *val = NULL;
-
-  BoltDevice *dev = BOLT_DEVICE (gobject);
-  const char *prop_name;
-  GValue prop_val =  G_VALUE_INIT;
-  GValue str_val = G_VALUE_INIT;
-
-  uid = bolt_device_get_uid (dev);
-  dev_name = bolt_device_get_name (dev);
-
-  prop_name = g_param_spec_get_name (pspec);
-
-  g_value_init (&prop_val, G_PARAM_SPEC_VALUE_TYPE (pspec));
-  g_value_init (&str_val, G_TYPE_STRING);
-
-  g_object_get_property (G_OBJECT (dev), prop_name, &prop_val);
-  g_print ("[%s] %30s | %10s -> ", uid, dev_name, prop_name);
-
-  if (g_value_transform (&prop_val, &str_val))
-    val = g_value_dup_string (&str_val);
-  else
-    val = g_strdup_value_contents (&prop_val);
-
-  g_print ("%s\n", val ? : "");
-
-  g_value_unset (&str_val);
-  g_value_unset (&prop_val);
-}
-
-static void
-handle_device_added (BoltClient *cli,
-                     const char *opath,
-                     gpointer    user_data)
-{
-  g_autoptr(GError) err = NULL;
-  GDBusConnection *bus;
-  BoltDevice *dev;
-  GPtrArray *devices = user_data;
-
-  g_print (" DeviceAdded: %s\n", opath);
-
-  bus = g_dbus_proxy_get_connection (G_DBUS_PROXY (cli));
-  dev = bolt_device_new_for_object_path (bus, opath, NULL, &err);
-
-  if (err != NULL)
-    {
-      g_warning ("Could not create proxy object for %s", opath);
-      return;
-    }
-
-  g_ptr_array_add (devices, dev);
-  g_signal_connect (dev, "notify",
-                    G_CALLBACK (handle_device_changed),
-                    NULL);
-}
-
-static void
-handle_device_removed (BoltClient *cli,
-                       const char *opath,
-                       gpointer    user_data)
-{
-  GPtrArray *devices = user_data;
-  BoltDevice *device = NULL;
-
-  g_print (" DeviceRemoved: %s\n", opath);
-
-  for (guint i = 0; i < devices->len; i++)
-    {
-      BoltDevice *dev = g_ptr_array_index (devices, i);
-      const char *dev_opath = g_dbus_proxy_get_object_path (G_DBUS_PROXY (dev));
-
-      if (bolt_streq (opath, dev_opath))
-        {
-          device = dev;
-          break;
-        }
-    }
-
-  if (device == NULL)
-    {
-      g_warning ("DeviceRemoved signal for unknown device: %s", opath);
-      return;
-    }
-
-  g_signal_handlers_block_by_func (device, handle_device_changed, devices);
-  g_ptr_array_remove_fast (devices, device);
-}
-
-static void
-handle_probing_changed (BoltClient *client,
-                        GParamSpec *pspec,
-                        gpointer    user_data)
-{
-  gboolean probing = bolt_client_is_probing (client);
-
-  if (probing)
-    g_print ("Probing started\n");
-  else
-    g_print ("Probing done\n");
-}
-
-static int
-monitor (BoltClient *client, int argc, char **argv)
-{
-  g_autoptr(GOptionContext) optctx = NULL;
-  g_autoptr(GError) error = NULL;
-  g_autoptr(GMainLoop) main_loop = NULL;
-  g_autoptr(GPtrArray) devices = NULL;
-  g_autofree char *amstr = NULL;
-  BoltSecurity security;
-  BoltAuthMode authmode;
-  guint version = 0;
-
-  optctx = g_option_context_new ("- Watch for changes");
-
-  if (!g_option_context_parse (optctx, &argc, &argv, &error))
-    return usage_error (error);
-
-  version = bolt_client_get_version (client);
-  security = bolt_client_get_security (client);
-  authmode = bolt_client_get_authmode (client);
-  amstr = bolt_flags_to_string (BOLT_TYPE_AUTH_MODE, authmode, NULL);
-
-  if (!bolt_proxy_has_name_owner (BOLT_PROXY (client)))
-    g_print ("%s no name owner for bolt (not running?)\n",
-             bolt_glyph (WARNING_SIGN));
-
-  g_print ("Bolt Version  : %d.%d\n", VERSION_MAJOR, VERSION_MINOR);
-  g_print ("Daemon API    : %u\n", version);
-  g_print ("Client API    : %u\n", BOLT_DBUS_API_VERSION);
-  g_print ("Security Level: %s\n", bolt_security_to_string (security));
-  g_print ("Auth Mode     : %s\n", amstr);
-  g_print ("Ready\n");
-
-  devices = bolt_client_list_devices (client, NULL, &error);
-
-  if (devices == NULL)
-    {
-      g_warning ("Could not list devices: %s", error->message);
-      devices = g_ptr_array_new_with_free_func (g_object_unref);
-    }
-
-  bolt_devices_sort_by_syspath (devices, FALSE);
-  for (guint i = 0; i < devices->len; i++)
-    {
-      BoltDevice *dev = g_ptr_array_index (devices, i);
-      g_signal_connect (dev, "notify",
-                        G_CALLBACK (handle_device_changed),
-                        NULL);
-    }
-
-  g_signal_connect (client, "device-added",
-                    G_CALLBACK (handle_device_added), devices);
-
-  g_signal_connect (client, "device-removed",
-                    G_CALLBACK (handle_device_removed), devices);
-
-  g_signal_connect (client, "notify::probing",
-                    G_CALLBACK (handle_probing_changed), NULL);
-
-  main_loop = g_main_loop_new (NULL, FALSE);
-  g_main_loop_run (main_loop);
-
-  g_signal_handlers_disconnect_by_func (client,
-                                        G_CALLBACK (handle_probing_changed),
-                                        NULL);
-
-  return EXIT_SUCCESS;
-}
-
-
-static int
-list_devices (BoltClient *client, int argc, char **argv)
-{
-  g_autoptr(GOptionContext) optctx = NULL;
-  g_autoptr(GError) error = NULL;
-  g_autoptr(GPtrArray) devices = NULL;
-  gboolean show_all = FALSE;
-  GOptionEntry options[] = {
-    { "all", 'a', 0, G_OPTION_ARG_NONE, &show_all, "Show all devices", NULL },
-    { NULL }
-  };
-
-  optctx = g_option_context_new ("- List thunderbolt devices");
-  g_option_context_add_main_entries (optctx, options, NULL);
-
-  if (!g_option_context_parse (optctx, &argc, &argv, &error))
-    return usage_error (error);
-
-  devices = bolt_client_list_devices (client, NULL, &error);
-  if (devices == NULL)
-    {
-      g_printerr ("Failed to list devices: %s",
-                  error->message);
-      return EXIT_FAILURE;
-    }
-
-  bolt_devices_sort_by_syspath (devices, FALSE);
-  for (guint i = 0; i < devices->len; i++)
-    {
-      BoltDevice *dev = g_ptr_array_index (devices, i);
-      BoltDeviceType type;
-
-      if (!show_all)
-        {
-          type = bolt_device_get_device_type (dev);
-          if (type != BOLT_DEVICE_PERIPHERAL)
-            continue;
-        }
-
-      print_device (dev, FALSE);
-    }
-
-  return EXIT_SUCCESS;
-}
 
 /* ****  */
 
@@ -612,11 +282,13 @@ typedef struct SubCommand
 
 static SubCommand subcommands[] = {
   {"authorize",    authorize,     "Authorize a device"},
+  {"domains",      list_domains,  "List the active thunderbolt domains"},
   {"enroll",       enroll,        "Authorize and store a device in the database"},
   {"forget",       forget,        "Remove a stored device from the database"},
   {"info",         info,          "Show information about a device"},
   {"list",         list_devices,  "List connected and stored devices"},
-  {"monitor",      monitor,       "Listen and print changes"}
+  {"monitor",      monitor,       "Listen and print changes"},
+  {"power",        power,         "Force power configuration of the controller"}
 };
 
 #define SUMMARY_SPACING 17
@@ -647,9 +319,12 @@ main (int argc, char **argv)
   g_autofree char *cmdline = NULL;
   SubCommand *cmd = NULL;
   const char *cmdname = NULL;
+  const char *uuid_fmtstr = "full";
   gboolean version = FALSE;
+  int fmt = -1;
   GOptionEntry options[] = {
     { "version", 0, 0, G_OPTION_ARG_NONE, &version, "Print version information and exit", NULL },
+    { "uuids", 'U', 0, G_OPTION_ARG_STRING, &uuid_fmtstr, "How to format uuids [*full, short, alias]", NULL },
     { NULL }
   };
 
@@ -674,6 +349,10 @@ main (int argc, char **argv)
     cmdname = "list";
   else
     cmdname = argv[1];
+
+  fmt = format_uid_init (uuid_fmtstr, &error);
+  if (fmt == -1)
+    return usage_error (error);
 
   client = bolt_client_new (&error);
 

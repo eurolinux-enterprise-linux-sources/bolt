@@ -38,13 +38,17 @@ typedef enum BoltStatTime {
 gint64               bolt_sysfs_device_get_time (struct udev_device *udev,
                                                  BoltStatTime        st);
 
-gboolean             bolt_sysfs_device_is_domain (struct udev_device *udev);
+gboolean             bolt_sysfs_device_is_domain (struct udev_device *udev,
+                                                  GError            **error);
 
-struct udev_device * bolt_sysfs_domain_for_device (struct udev_device *udev);
+struct udev_device * bolt_sysfs_domain_for_device (struct udev_device  *udev,
+                                                   struct udev_device **host);
 
 BoltSecurity         bolt_sysfs_security_for_device (struct udev_device *udev,
                                                      GError            **error);
 
+int                  bolt_sysfs_count_domains (struct udev *udev,
+                                               GError     **error);
 typedef struct _BoltDevInfo
 {
 
@@ -54,11 +58,10 @@ typedef struct _BoltDevInfo
   gint   boot;
 
   /* if 'full' is true the rest is valid */
-  gboolean     full;
-  gint64       ctim;
-  const char  *syspath;
-  const char  *parent;      /* the uid */
-  BoltSecurity security;
+  gboolean    full;
+  gint64      ctim;
+  const char *syspath;
+  const char *parent;       /* the uid */
 
 } BoltDevInfo;
 
@@ -66,5 +69,14 @@ gboolean             bolt_sysfs_info_for_device (struct udev_device *udev,
                                                  gboolean            full,
                                                  BoltDevInfo        *info,
                                                  GError            **error);
+
+gboolean             bolt_sysfs_read_boot_acl (struct udev_device *udev,
+                                               GStrv              *out,
+                                               GError            **error);
+
+gboolean             bolt_sysfs_write_boot_acl (const char *device,
+                                                GStrv       acl,
+                                                GError    **error);
+
 
 G_END_DECLS

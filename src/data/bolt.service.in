@@ -1,5 +1,7 @@
 [Unit]
 Description=Thunderbolt system service
+After=polkit.service
+Documentation=man:boltd(8)
 
 [Service]
 Type=dbus
@@ -7,6 +9,7 @@ BusName=org.freedesktop.bolt
 ExecStart=@libexecdir@/boltd
 #Environment="G_MESSAGES_DEBUG=all"
 Restart=on-failure
+NotifyAccess=main
 
 MemoryDenyWriteExecute=yes
 PrivateTmp=yes
@@ -18,3 +21,9 @@ RestrictAddressFamilies=AF_NETLINK AF_UNIX
 RestrictRealtime=yes
 ReadWritePaths=@dbdir@
 SystemCallFilter=~@mount
+CapabilityBoundingSet=CAP_NET_ADMIN
+
+#directory management
+RuntimeDirectory=@dbname@
+RuntimeDirectoryPreserve=yes
+StateDirectory=@dbname@

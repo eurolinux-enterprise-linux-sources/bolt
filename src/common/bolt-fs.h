@@ -29,4 +29,12 @@ G_BEGIN_DECLS
 gboolean     bolt_fs_make_parent_dirs (GFile   *target,
                                        GError **error);
 
+gboolean     bolt_fs_cleanup_dir (const char *target,
+                                  GError    **error);
+
+gboolean     bolt_fs_touch (GFile   *target,
+                            guint64  atime,
+                            guint64  mtime,
+                            GError **error);
+
 G_END_DECLS

@@ -32,6 +32,15 @@ gboolean          bolt_enum_class_validate (GEnumClass *enum_class,
                                             gint        value,
                                             GError    **error);
 
+const char *      bolt_enum_class_to_string (GEnumClass *enum_class,
+                                             gint        value,
+                                             GError    **error);
+
+gboolean          bolt_enum_class_from_string (GEnumClass *enum_class,
+                                               const char *string,
+                                               gint       *enum_out,
+                                               GError    **error);
+
 const char *      bolt_enum_to_string (GType    enum_type,
                                        gint     value,
                                        GError **error);
@@ -102,7 +111,6 @@ const char *     bolt_status_to_string (BoltStatus status);
 gboolean         bolt_status_is_authorized (BoltStatus status);
 gboolean         bolt_status_is_connected (BoltStatus status);
 gboolean         bolt_status_is_pending (BoltStatus status);
-gboolean         bolt_status_validate (BoltStatus status);
 
 /**
  * BoltAuthFlags:
@@ -170,7 +178,6 @@ typedef enum {
 
 BoltSecurity     bolt_security_from_string (const char *str);
 const char *     bolt_security_to_string (BoltSecurity security);
-gboolean         bolt_security_validate (BoltSecurity security);
 gboolean         bolt_security_allows_pcie (BoltSecurity security);
 
 /**
@@ -228,7 +235,6 @@ typedef enum {
 
 BoltDeviceType   bolt_device_type_from_string (const char *str);
 const char *     bolt_device_type_to_string (BoltDeviceType type);
-gboolean         bolt_device_type_validate (BoltDeviceType type);
 gboolean         bolt_device_type_is_host (BoltDeviceType type);
 
 /**
@@ -247,3 +253,25 @@ typedef enum { /*< flags >*/
 
 #define bolt_auth_mode_is_enabled(auth) ((auth & BOLT_AUTH_ENABLED) != 0)
 #define bolt_auth_mode_is_disabled(auth) (!bolt_auth_mode_is_enabled (auth))
+
+/**
+ * BoltPowerState:
+ * @BOLT_FORCE_POWER_UNSET: Force power was not set by bolt.
+ * @BOLT_FORCE_POWER_OFF: Force power is set to off.
+ * @BOLT_FORCE_POWER_ON: Force power is set to on.
+ * @BOLT_FORCE_POWER_WAIT: Force power is not requested anymore
+ *  but still active; so that code can process udev events
+ *  properly.
+ *
+ * The force power state that bolt set on thunderbolt controller.
+ */
+typedef enum {
+
+  BOLT_FORCE_POWER_UNSET = -1,
+  BOLT_FORCE_POWER_OFF   =  0,
+  BOLT_FORCE_POWER_ON    =  1,
+  BOLT_FORCE_POWER_WAIT  =  2,
+
+} BoltPowerState;
+
+const char *     bolt_power_state_to_string (BoltPowerState state);

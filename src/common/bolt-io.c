@@ -30,6 +30,20 @@
 #include <stdio.h>
 #include <string.h>
 
+#if !HAVE_FN_COPY_FILE_RANGE
+#include <unistd.h>
+#include <sys/syscall.h>
+#  ifndef __NR_copy_file_range
+#    if defined(__x86_64__)
+#      define __NR_copy_file_range 326
+#    elif defined(__i386__)
+#      define __NR_copy_file_range 377
+#    else
+#      error "__NR_copy_file_range on this architecture"
+#    endif
+#  endif
+#endif
+
 #include "bolt-error.h"
 #include "bolt-str.h"
 
@@ -40,7 +54,11 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (FILE, fclose);
 int
 bolt_open (const char *path, int flags, int mode, GError **error)
 {
-  int fd = g_open (path, flags, mode);
+  int fd;
+
+  g_return_val_if_fail (error == NULL || *error == NULL, -1);
+
+  fd = g_open (path, flags, mode);
 
   if (fd < 0)
     {
@@ -57,7 +75,11 @@ bolt_open (const char *path, int flags, int mode, GError **error)
 static FILE *
 bolt_fdopen (int fd, const char *mode, GError **error)
 {
-  FILE *fp = fdopen (fd, mode);
+  FILE *fp;
+
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
+
+  fp = fdopen (fd, mode);
 
   if (fp == NULL)
     {
@@ -75,6 +97,8 @@ gboolean
 bolt_close (int fd, GError **error)
 {
   int r;
+
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   r = close (fd);
 
@@ -99,6 +123,9 @@ bolt_read_all (int      fd,
   char *data = buf;
   gsize count = 0;
   gboolean ok = TRUE;
+
+  g_return_val_if_fail (buf != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   do
     {
@@ -144,6 +171,9 @@ bolt_write_all (int         fd,
 {
   const char *data = buf;
   gboolean ok = TRUE;
+
+  g_return_val_if_fail (buf != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   if (nbytes < 0)
     nbytes = strlen (data);
@@ -191,6 +221,8 @@ bolt_opendir (const char *path,
 {
   DIR *d = NULL;
 
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
+
   d = opendir (path);
   if (d == NULL)
     {
@@ -208,11 +240,14 @@ bolt_opendir (const char *path,
 }
 
 int
-bolt_openat (int dirfd, const char *path, int oflag, GError **error)
+bolt_openat (int dirfd, const char *path, int oflag, int mode, GError **error)
 {
   int fd = -1;
 
-  fd = openat (dirfd, path, oflag);
+  g_return_val_if_fail (path != NULL, -1);
+  g_return_val_if_fail (error == NULL || *error == NULL, -1);
+
+  fd = openat (dirfd, path, oflag, mode);
 
   if (fd < 0)
     {
@@ -237,7 +272,10 @@ bolt_opendir_at (int         dirfd,
   int fd = -1;
   DIR *cd;
 
-  fd = bolt_openat (dirfd, name, oflag, error);
+  g_return_val_if_fail (name != NULL, NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
+
+  fd = bolt_openat (dirfd, name, oflag, 0, error);
   if (fd < 0)
     return NULL;
 
@@ -262,6 +300,8 @@ bolt_closedir (DIR     *d,
 {
   int r;
 
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
   r = closedir (d);
 
   if (r < 0)
@@ -284,6 +324,9 @@ bolt_rmdir (const char *name,
 {
   int r;
 
+  g_return_val_if_fail (name != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
   r = rmdir (name);
 
   if (r < 0)
@@ -305,6 +348,9 @@ bolt_unlink (const char *name,
              GError    **error)
 {
   int r;
+
+  g_return_val_if_fail (name != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   r = unlink (name);
 
@@ -331,6 +377,9 @@ bolt_unlink_at (int         dirfd,
 {
   int r;
 
+  g_return_val_if_fail (name != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
   r = unlinkat (dirfd, name, flag);
 
   if (r < 0)
@@ -356,7 +405,14 @@ bolt_read_value_at (int         dirfd,
   char line[LINE_MAX], *l;
   int fd;
 
-  fd = bolt_openat (dirfd, name, O_NOFOLLOW | O_CLOEXEC | O_RDONLY, error);
+  g_return_val_if_fail (name != NULL, NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
+
+  fd = bolt_openat (dirfd,
+                    name,
+                    O_NOFOLLOW | O_CLOEXEC | O_RDONLY,
+                    0,
+                    error);
 
   if (fd < 0)
     return NULL;
@@ -402,7 +458,10 @@ bolt_write_char_at (int         dirfd,
   int fd;
   ssize_t n;
 
-  fd = bolt_openat (dirfd, name, O_WRONLY | O_CLOEXEC, error);
+  g_return_val_if_fail (name != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  fd = bolt_openat (dirfd, name, O_WRONLY | O_CLOEXEC, 0, error);
   if (fd < 0)
     return FALSE;
 
@@ -449,6 +508,9 @@ bolt_read_int_at (int         dirfd,
   g_autofree char *str = NULL;
   gboolean ok;
 
+  g_return_val_if_fail (name != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
   str = bolt_read_value_at (dirfd, name, error);
 
   if (str == NULL)
@@ -478,6 +540,9 @@ bolt_verify_uid (int         dirfd,
   gsize have_len;
   gboolean ok;
 
+  g_return_val_if_fail (want != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
   have = bolt_read_value_at (dirfd, "unique_id", &err);
 
   if (have == NULL)
@@ -499,4 +564,316 @@ bolt_verify_uid (int         dirfd,
                  have, want);
 
   return ok;
+}
+
+gboolean
+bolt_file_write_all (const char *fn,
+                     const void *data,
+                     gssize      n,
+                     GError    **error)
+{
+  int fd = -1;
+  gboolean ok;
+
+  g_return_val_if_fail (fn != NULL, FALSE);
+  g_return_val_if_fail (data != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  fd = bolt_open (fn, O_CLOEXEC | O_WRONLY | O_TRUNC | O_CREAT, 0666, error);
+
+  if (fd < 0)
+    return FALSE;
+
+  ok = bolt_write_all (fd, data, n, error);
+
+  if (ok)
+    ok = bolt_close (fd, error);
+  else
+    (void) close (fd);
+
+  return ok;
+}
+
+gboolean
+bolt_ftruncate (int      fd,
+                off_t    size,
+                GError **error)
+{
+  int r;
+
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  r = ftruncate (fd, size);
+
+  if (r == -1)
+    {
+      g_set_error (error, G_IO_ERROR,
+                   g_io_error_from_errno (errno),
+                   "could not truncate file: %s",
+                   g_strerror (errno));
+      return FALSE;
+    }
+
+  return TRUE;
+}
+
+int
+bolt_mkfifo (const char *path,
+             mode_t      mode,
+             GError    **error)
+{
+  int r;
+
+  g_return_val_if_fail (path != NULL, -1);
+  g_return_val_if_fail (error == NULL || *error == NULL, -1);
+
+  r = mkfifo (path, mode);
+
+  if (r == -1)
+    {
+      gint code = g_io_error_from_errno (errno);
+      g_set_error (error, G_IO_ERROR, code,
+                   "could not create FIFO at '%s': %s",
+                   path, g_strerror (errno));
+      return -1;
+    }
+
+  return r;
+}
+
+gboolean
+bolt_faddflags (int      fd,
+                int      flags,
+                GError **error)
+{
+  int cur;
+  int code;
+
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  cur = fcntl (fd, F_GETFL);
+  if (cur != -1)
+    {
+      cur |= flags;
+      cur = fcntl (fd, F_SETFL, cur);
+    }
+
+  if (cur != -1)
+    return TRUE;
+
+  code = g_io_error_from_errno (errno);
+  g_set_error (error, G_IO_ERROR, code,
+               "could not add flags to fd: %s",
+               g_strerror (errno));
+
+  return FALSE;
+}
+
+gboolean
+bolt_fstat (int          fd,
+            struct stat *statbuf,
+            GError     **error)
+{
+  int code;
+  int r;
+
+  g_return_val_if_fail (statbuf != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  r = fstat (fd, statbuf);
+
+  if (r == 0)
+    return TRUE;
+
+  code = errno;
+  g_set_error (error, G_IO_ERROR,
+               g_io_error_from_errno (code),
+               "could not stat file: %s",
+               g_strerror (code));
+
+  return FALSE;
+}
+
+gboolean
+bolt_fstatat (int          dirfd,
+              const char  *pathname,
+              struct stat *statbuf,
+              int          flags,
+              GError     **error)
+{
+  int code;
+  int r;
+
+  g_return_val_if_fail (dirfd > -1, FALSE);
+  g_return_val_if_fail (pathname != NULL, FALSE);
+  g_return_val_if_fail (statbuf != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  r = fstatat (dirfd, pathname, statbuf, flags);
+
+  if (r == 0)
+    return TRUE;
+
+  code = errno;
+  g_set_error (error, G_IO_ERROR,
+               g_io_error_from_errno (code),
+               "could not stat file '%s': %s",
+               pathname,
+               g_strerror (code));
+
+  return FALSE;
+}
+
+gboolean
+bolt_fdatasync (int      fd,
+                GError **error)
+{
+  int code;
+  int r;
+
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  r = fdatasync (fd);
+
+  if (r == 0)
+    return TRUE;
+
+  code = errno;
+  g_set_error (error, G_IO_ERROR,
+               g_io_error_from_errno (code),
+               "could not sync file data : %s",
+               g_strerror (code));
+
+  return FALSE;
+}
+
+gboolean
+bolt_lseek (int      fd,
+            off_t    offset,
+            int      whence,
+            int     *pos,
+            GError **error)
+{
+  off_t p;
+
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  p = lseek (fd, offset, whence);
+
+  if (p == (off_t) -1)
+    {
+      int code = errno;
+      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (code),
+                   "could not seek file: %s", g_strerror (code));
+      return FALSE;
+    }
+
+  if (pos)
+    *pos = p;
+
+  return TRUE;
+}
+
+gboolean
+bolt_rename (const char *from,
+             const char *to,
+             GError    **error)
+{
+  int code;
+  int r;
+
+  g_return_val_if_fail (from != NULL, FALSE);
+  g_return_val_if_fail (to != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  r = rename (from, to);
+
+  if (r == 0)
+    return TRUE;
+
+  code = errno;
+  g_set_error (error, G_IO_ERROR,
+               g_io_error_from_errno (code),
+               "could not rename '%s' to '%s': %s",
+               from, to, g_strerror (code));
+
+  return FALSE;
+}
+
+#if !HAVE_FN_COPY_FILE_RANGE
+static loff_t
+copy_file_range (int          fd_in,
+                 loff_t      *off_in,
+                 int          fd_out,
+                 loff_t      *off_out,
+                 size_t       len,
+                 unsigned int flags)
+{
+  return syscall (__NR_copy_file_range,
+                  fd_in, off_in,
+                  fd_out, off_out,
+                  len,
+                  flags);
+}
+#endif
+
+gboolean
+bolt_copy_bytes (int      fd_from,
+                 int      fd_to,
+                 size_t   len,
+                 GError **error)
+{
+  g_return_val_if_fail (fd_from > -1, FALSE);
+  g_return_val_if_fail (fd_to > -1, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  do
+    {
+      ssize_t r;
+
+      r = copy_file_range (fd_from, NULL, fd_to, NULL, len, 0);
+
+      if (r == -1)
+        {
+          int code = errno;
+
+          g_set_error (error, G_IO_ERROR,
+                       g_io_error_from_errno (code),
+                       "error while copying data: %s",
+                       g_strerror (code));
+
+          return FALSE;
+        }
+      else if (r == 0)
+        {
+          break;
+        }
+
+      len -= r;
+
+    }
+  while (len > 0);
+
+  return len == 0;
+}
+
+
+/* auto cleanup helpers */
+void
+bolt_cleanup_close_intpr (int *fd)
+{
+  g_return_if_fail (fd != NULL);
+
+  if (*fd > -1)
+    {
+      int errsave = errno;
+      int r;
+
+      r = close (*fd);
+
+      if (r != 0 && errno == EBADF)
+        g_warning ("invalid fd passed to auto cleanup");
+
+      errno = errsave;
+    }
 }

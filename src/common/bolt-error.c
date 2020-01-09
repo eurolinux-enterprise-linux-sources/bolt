@@ -84,6 +84,37 @@ bolt_err_cancelled (const GError *error)
 }
 
 gboolean
+bolt_err_badstate (const GError *error)
+{
+  return g_error_matches (error, BOLT_ERROR, BOLT_ERROR_BADSTATE);
+}
+
+gboolean
+bolt_err_nokey (const GError *error)
+{
+  return g_error_matches (error, BOLT_ERROR, BOLT_ERROR_NOKEY);
+}
+
+gboolean
+bolt_error_propagate (GError **dest,
+                      GError **source)
+{
+  GError *src;
+
+  g_return_val_if_fail (source != NULL, FALSE);
+
+  src = *source;
+
+  if (src == NULL)
+    return TRUE;
+
+  g_propagate_error (dest, src);
+  *source = NULL;
+
+  return FALSE;
+}
+
+gboolean
 bolt_error_propagate_stripped (GError **dest,
                                GError **source)
 {
@@ -100,5 +131,32 @@ bolt_error_propagate_stripped (GError **dest,
     g_dbus_error_strip_remote_error (src);
 
   g_propagate_error (dest, g_steal_pointer (source));
+  return FALSE;
+}
+
+gboolean
+bolt_error_for_errno (GError    **error,
+                      gint        err_no,
+                      const char *format,
+                      ...)
+{
+  va_list ap;
+  int code;
+
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+  g_return_val_if_fail (format != NULL, FALSE);
+
+  if (err_no == 0)
+    return TRUE;
+
+  if (error == NULL)
+    return FALSE;
+
+  code = g_io_error_from_errno (err_no);
+
+  va_start (ap, format);
+  *error = g_error_new_valist (G_IO_ERROR, code, format, ap);
+  va_end (ap);
+
   return FALSE;
 }

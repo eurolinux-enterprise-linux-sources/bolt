@@ -21,7 +21,10 @@
 #include "config.h"
 
 #include "bolt-device.h"
+#include "bolt-domain.h"
 #include "bolt-error.h"
+#include "bolt-macros.h"
+#include "bolt-rnd.h"
 #include "bolt-str.h"
 #include "bolt-term.h"
 
@@ -34,42 +37,40 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-/* stolen from glib */
-static const char *
-log_level_to_priority (GLogLevelFlags log_level)
+/* mapping taking from glib */
+typedef struct BoltLogLevel
 {
-  if (log_level & G_LOG_LEVEL_ERROR)
-    return "3";
-  else if (log_level & G_LOG_LEVEL_CRITICAL)
-    return "4";
-  else if (log_level & G_LOG_LEVEL_WARNING)
-    return "4";
-  else if (log_level & G_LOG_LEVEL_MESSAGE)
-    return "5";
-  else if (log_level & G_LOG_LEVEL_INFO)
-    return "6";
-  else if (log_level & G_LOG_LEVEL_DEBUG)
-    return "7";
+  GLogLevelFlags code;
+  const char    *prio;
+  const char    *name;
+} BoltLogLevel;
+
+BoltLogLevel known_levels[] = {
+  {G_LOG_LEVEL_ERROR,    "3", "error"},
+  {G_LOG_LEVEL_CRITICAL, "4", "critical"},
+  {G_LOG_LEVEL_WARNING,  "4", "warning"},
+  {G_LOG_LEVEL_MESSAGE,  "5", "message"},
+  {G_LOG_LEVEL_INFO,     "6", "info"},
+  {G_LOG_LEVEL_DEBUG,    "7", "debug"}
+};
+
+const char *
+bolt_log_level_to_priority (GLogLevelFlags log_level)
+{
+  for (gsize i = 0; i < G_N_ELEMENTS (known_levels); i++)
+    if (known_levels[i].code & log_level)
+      return known_levels[i].prio;
 
   /* Default to LOG_NOTICE for custom log levels. */
   return "5";
 }
 
-static const char *
-log_level_to_string (GLogLevelFlags log_level)
+const char *
+bolt_log_level_to_string (GLogLevelFlags log_level)
 {
-  if (log_level & G_LOG_LEVEL_ERROR)
-    return "error";
-  else if (log_level & G_LOG_LEVEL_CRITICAL)
-    return "critical";
-  else if (log_level & G_LOG_LEVEL_WARNING)
-    return "warning";
-  else if (log_level & G_LOG_LEVEL_MESSAGE)
-    return "message";
-  else if (log_level & G_LOG_LEVEL_INFO)
-    return "info";
-  else if (log_level & G_LOG_LEVEL_DEBUG)
-    return "debug";
+  for (gsize i = 0; i < G_N_ELEMENTS (known_levels); i++)
+    if (known_levels[i].code & log_level)
+      return known_levels[i].name;
 
   return "user";
 }
@@ -180,6 +181,32 @@ bolt_log_ctx_find_field (const BoltLogCtx *ctx,
 }
 
 static void
+handle_domain_field (BoltLogCtx *ctx,
+                     const char *key,
+                     gpointer    ptr)
+{
+  BoltDomain *dom = BOLT_DOMAIN (ptr);
+  const char *name;
+  GLogField *field;
+
+  g_return_if_fail (BOLT_IS_DOMAIN (dom));
+
+  bolt_log_ctx_next_field (ctx, &field);
+  field->key = BOLT_LOG_DOMAIN_UID;
+  field->value = bolt_domain_get_uid (dom);
+  field->length = -1;
+
+  name = bolt_domain_get_id (dom);
+  if (name == NULL)
+    return;
+
+  bolt_log_ctx_next_field (ctx, &field);
+  field->key = BOLT_LOG_DOMAIN_NAME;
+  field->value = name;
+  field->length = -1;
+}
+
+static void
 handle_device_field (BoltLogCtx *ctx,
                      const char *key,
                      gpointer    ptr)
@@ -264,24 +291,36 @@ handle_topic_field (BoltLogCtx *ctx,
     ctx->is_bug = TRUE;
 }
 
+struct SpecialField
+{
+  const char *name;
+  void        (*hanlder) (BoltLogCtx *ctx,
+                          const char *key,
+                          gpointer    ptr);
+} special_fields[] = {
+  {"device", handle_device_field},
+  {"domain", handle_domain_field},
+  {"error",  handle_gerror_field},
+  {"topic",  handle_topic_field}
+};
+
 static gboolean
 handle_special_field (BoltLogCtx *ctx,
                       const char *key,
                       gpointer    ptr)
 {
-  gboolean handled = TRUE;
+  gboolean handled = FALSE;
 
   key++; /* remove the special key indicator */
 
-  if (g_str_has_prefix (key, "device"))
-    handle_device_field (ctx, key, ptr);
-  else if (g_str_equal (key, "error"))
-    handle_gerror_field (ctx, key, ptr);
-  else if (g_str_equal (key, "topic"))
-    handle_topic_field (ctx, key, ptr);
-  else
-
-    handled = FALSE;
+  for (gsize i = 0; i < G_N_ELEMENTS (special_fields); i++)
+    {
+      if (g_str_equal (key, special_fields[i].name))
+        {
+          special_fields[i].hanlder (ctx, key, ptr);
+          handled = TRUE;
+        }
+    }
 
   return handled;
 }
@@ -373,7 +412,7 @@ bolt_logv (const char    *domain,
   ctx.message->length = -1;
 
   ctx.priority->key = "PRIORITY";
-  ctx.priority->value = log_level_to_priority (level);
+  ctx.priority->value = bolt_log_level_to_priority (level);
   ctx.priority->length = -1;
 
   ctx.domain->key = "GLIB_DOMAIN";
@@ -393,18 +432,31 @@ bolt_logv (const char    *domain,
 #pragma GCC diagnostic pop
 
 static char *
-format_device_id (BoltDevice *device, char *buffer, gsize len, int size)
+format_uid_name (const char *uid,
+                 const char *name,
+                 char       *buffer,
+                 gsize       len,
+                 int         size)
 {
   static const int u = 13;
+  int n;
+
+  n = MAX (0, size - u);
+  g_snprintf (buffer, len, "%-.*s-%-*.*s", u, uid, n, n, name);
+  return buffer;
+}
+
+static char *
+format_device_id (BoltDevice *device, char *buffer, gsize len, int size)
+{
   const char *uid;
   const char *name;
-  int n;
 
   uid = bolt_device_get_uid (device);
   name = bolt_device_get_name (device);
 
-  n = MAX (0, size - u);
-  g_snprintf (buffer, len, "%-.*s-%-*.*s", u, uid, n, n, name);
+  format_uid_name (uid, name, buffer, len, size);
+
   return buffer;
 }
 
@@ -449,6 +501,18 @@ bolt_log_stdstream (const BoltLogCtx *ctx,
       format_device_id (ctx->device, name, sizeof (name), 30);
       g_fprintf (out, "[%s%s%s] ", blue, name, normal);
     }
+  else if (bolt_log_ctx_find_field (ctx, BOLT_LOG_DOMAIN_UID, &f))
+    {
+      const char *uid = f->value;
+      const char *name = "domain?";
+      char ident[64];
+
+      if (bolt_log_ctx_find_field (ctx, BOLT_LOG_DOMAIN_NAME, &f))
+        name = f->value;
+
+      format_uid_name (uid, name, ident, sizeof (ident), 30);
+      g_fprintf (out, "[%s%s%s] ", blue, ident, fg);
+    }
   else if (bolt_log_ctx_find_field (ctx, BOLT_LOG_DEVICE_UID, &f))
     {
       const char *uid = f->value;
@@ -468,7 +532,7 @@ bolt_log_stdstream (const BoltLogCtx *ctx,
       const char *msg = ctx->error->message;
       if (strlen (message) == 0)
         {
-          const char *lvl = log_level_to_string (log_level);
+          const char *lvl = bolt_log_level_to_string (log_level);
           g_fprintf (out, "%s%s%s", fg, lvl, normal);
         }
       g_fprintf (out, ": %s%s%s", yellow, msg, normal);
@@ -499,21 +563,17 @@ bolt_cat_printf (char **buffer, gsize *size, const char *fmt, ...)
   return n;
 }
 
-GLogWriterOutput
-bolt_log_journal (const BoltLogCtx *ctx,
-                  GLogLevelFlags    log_level,
-                  guint             flags)
+void
+bolt_log_fmt_journal (const BoltLogCtx *ctx,
+                      GLogLevelFlags    log_level,
+                      char             *message,
+                      gsize             size)
 {
-  GLogWriterOutput res;
   const char *m;
-  const char *old = NULL;
-  char message[2048];
-  gsize size = sizeof (message);
   char *p = message;
   const GLogField *f;
 
-  if (ctx == NULL || ctx->message == NULL)
-    return G_LOG_WRITER_UNHANDLED;
+  g_return_if_fail (ctx != NULL && ctx->message != NULL);
 
   if (ctx->device)
     {
@@ -521,6 +581,18 @@ bolt_log_journal (const BoltLogCtx *ctx,
 
       format_device_id (ctx->device, name, sizeof (name), 40);
       bolt_cat_printf (&p, &size, "[%s] ", name);
+    }
+  else if (bolt_log_ctx_find_field (ctx, BOLT_LOG_DOMAIN_UID, &f))
+    {
+      const char *uid = f->value;
+      const char *name = "domain?";
+      char ident[64];
+
+      if (bolt_log_ctx_find_field (ctx, BOLT_LOG_DOMAIN_NAME, &f))
+        name = f->value;
+
+      format_uid_name (uid, name, ident, sizeof (ident), 40);
+      bolt_cat_printf (&p, &size, "[%s] ", ident);
     }
   else if (bolt_log_ctx_find_field (ctx, BOLT_LOG_DEVICE_UID, &f))
     {
@@ -539,21 +611,32 @@ bolt_log_journal (const BoltLogCtx *ctx,
       const GError *error = ctx->error;
       const char *msg = error->message;
       if (strlen (m) == 0)
-        bolt_cat_printf (&p, &size, "%s", log_level_to_string (log_level));
+        bolt_cat_printf (&p, &size, "%s", bolt_log_level_to_string (log_level));
 
       bolt_cat_printf (&p, &size, ": %s", msg);
     }
+}
 
-  old = ctx->message->value;
-  ctx->message->value = message;
+GLogWriterOutput
+bolt_log_journal (const BoltLogCtx *ctx,
+                  GLogLevelFlags    log_level,
+                  guint             flags)
+{
+  GLogWriterOutput res;
+  char message[2048];
+  GLogField msg = {"MESSAGE", message, -1};
+
+  g_return_val_if_fail (ctx != NULL, G_LOG_WRITER_UNHANDLED);
+  g_return_val_if_fail (ctx->message != NULL, G_LOG_WRITER_UNHANDLED);
+
+  bolt_log_fmt_journal (ctx, log_level, message, sizeof (message));
+
+  *ctx->message = msg;
 
   res = g_log_writer_journald (log_level,
                                ctx->fields,
                                ctx->n_fields,
                                NULL);
-
-  ctx->message->value = old;
-
   return res;
 }
 
@@ -577,20 +660,25 @@ bolt_log_ctx_acquire (const GLogField *fields,
   ctx = g_new0 (BoltLogCtx, 1);
   ctx->allocated = TRUE;
 
-  bolt_log_ctx_next_field (ctx, &ctx->message);
-  bolt_log_ctx_next_field (ctx, &ctx->priority);
-  bolt_log_ctx_next_field (ctx, &ctx->domain);
-
   for (gsize i = 0; i < n; i++)
     {
       GLogField *field = (GLogField *) &fields[i];
 
       if (bolt_streq (field->key, "MESSAGE"))
-        ctx->message = field;
+        {
+          bolt_log_ctx_next_field (ctx, &ctx->message);
+          *(ctx->message) = *field;
+        }
       else if (bolt_streq (field->key, "GLIB_DOMAIN"))
-        ctx->domain = field;
+        {
+          bolt_log_ctx_next_field (ctx, &ctx->domain);
+          *(ctx->domain) = *field;
+        }
       else if (bolt_streq (field->key, "PRIORITY"))
-        ctx->priority = field;
+        {
+          bolt_log_ctx_next_field (ctx, &ctx->priority);
+          *(ctx->priority) = *field;
+        }
     }
 
   if (ctx->message == NULL)
@@ -631,4 +719,25 @@ const char *
 blot_log_ctx_get_domain (BoltLogCtx *ctx)
 {
   return ctx->domain ? ctx->domain->value : NULL;
+}
+
+void
+bolt_log_gen_id (char id[BOLT_LOG_MSG_IDLEN])
+{
+  guint8 data[16] = {0, };
+  static const char ch[16] = "0123456789abcdef";
+
+  bolt_get_random_data (&data, sizeof (data));
+
+  for (guint i = 0; i < 16; i++)
+    {
+      const guint8 b = data[i];
+
+      g_assert_cmpint ((b >> 4),  <, sizeof (ch));
+
+      id[i * 2]     = ch[b >> 4];
+      id[i * 2 + 1] = ch[b & 15];
+    }
+
+  id[32] = '\0';
 }

@@ -21,59 +21,31 @@
 #include "config.h"
 
 #include "bolt-error.h"
+#include "bolt-fs.h"
 #include "bolt-io.h"
+#include "bolt-str.h"
+
+#include "bolt-config.h"
 #include "bolt-store.h"
 
 #include "bolt-daemon-resource.h"
+#include "mock-sysfs.h"
 
 #include <glib.h>
 #include <gio/gio.h>
 #include <glib/gprintf.h>
 #include <glib/gstdio.h>
 
-#include <dirent.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <locale.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h> /* unlinkat, truncate */
 
-static void
-cleanup_dir (DIR *d)
-{
-  struct dirent *de = NULL;
-
-  for (errno = 0, de = readdir (d); de != NULL; errno = 0, de = readdir (d))
-    {
-      g_autoptr(GError) error = NULL;
-      int uflag               = 0;
-
-      if (!g_strcmp0 (de->d_name, ".") ||
-          !g_strcmp0 (de->d_name, ".."))
-        continue;
-
-      if (de->d_type == DT_DIR)
-        {
-          g_autoptr(DIR) cd = NULL;
-
-          cd = bolt_opendir_at (dirfd (d), de->d_name, O_RDONLY, &error);
-          if (cd == NULL)
-            continue;
-
-          cleanup_dir (cd);
-          uflag = AT_REMOVEDIR;
-        }
-
-      bolt_unlink_at (dirfd (d), de->d_name, uflag, NULL);
-    }
-}
-
-
 typedef struct
 {
-  const char *path;
-  BoltStore  *store;
+  char      *path;
+  BoltStore *store;
 } TestStore;
 
 
@@ -108,24 +80,17 @@ test_store_setup (TestStore *tt, gconstpointer user_data)
 static void
 test_store_tear_down (TestStore *tt, gconstpointer user_data)
 {
-  DIR *d = NULL;
-
   g_autoptr(GError) error = NULL;
+  gboolean ok;
 
-  if (tt->store)
-    g_clear_object (&tt->store);
+  g_clear_object (&tt->store);
 
-  d = bolt_opendir (tt->path, &error);
-  if (d)
-    {
-      g_debug ("Cleaning up: %s", tt->path);
-      cleanup_dir (d);
-      bolt_closedir (d, NULL);
-      bolt_rmdir (tt->path, &error);
-    }
+  ok = bolt_fs_cleanup_dir (tt->path, &error);
 
-  if (error != NULL)
+  if (!ok)
     g_warning ("Could not clean up dir: %s", error->message);
+
+  g_free (tt->path);
 }
 
 static void
@@ -134,11 +99,16 @@ test_store_basic (TestStore *tt, gconstpointer user_data)
   g_autoptr(BoltDevice) dev = NULL;
   g_autoptr(BoltDevice) stored = NULL;
   g_autoptr(BoltKey) key = NULL;
+  g_autoptr(GFile) root = NULL;
   g_autoptr(GError) error = NULL;
+  g_autofree char *path = NULL;
   char uid[] = "fbc83890-e9bf-45e5-a777-b3728490989c";
   BoltKeyState keystate;
   gboolean ok;
 
+  g_object_get (tt->store, "root", &root, NULL);
+  path = g_file_get_path (root);
+  g_assert_cmpstr (tt->path, ==, path);
 
   dev = g_object_new (BOLT_TYPE_DEVICE,
                       "uid", uid,
@@ -191,8 +161,7 @@ test_store_basic (TestStore *tt, gconstpointer user_data)
   g_assert_no_error (error);
 
   key = bolt_key_new ();
-  g_assert_no_error (error);
-  g_assert_true (ok);
+  g_assert_nonnull (key);
 
   ok = bolt_store_put_device (tt->store, dev, BOLT_POLICY_MANUAL, key, &error);
   g_assert_no_error (error);
@@ -256,6 +225,7 @@ test_store_basic (TestStore *tt, gconstpointer user_data)
   g_assert_no_error (error);
 
   keystate = bolt_store_have_key (tt->store, uid);
+
   g_assert_cmpuint (keystate, ==, 0);
 
   ok = bolt_store_del_key (tt->store, uid, &error);
@@ -265,6 +235,70 @@ test_store_basic (TestStore *tt, gconstpointer user_data)
   g_clear_error (&error);
   g_assert_no_error (error);
 
+}
+
+static void
+test_store_config (TestStore *tt, gconstpointer user_data)
+{
+  g_autoptr(GKeyFile) kf = NULL;
+  g_autoptr(GKeyFile) loaded = NULL;
+  g_autoptr(GError) err = NULL;
+  BoltAuthMode authmode;
+  BoltPolicy policy;
+  gboolean ok;
+  BoltTri tri;
+
+  kf = bolt_store_config_load (tt->store, &err);
+  g_assert_error (err, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+  g_assert_null (kf);
+  g_clear_pointer (&err, g_error_free);
+
+  kf = bolt_config_user_init ();
+  g_assert_nonnull (kf);
+
+  ok = bolt_store_config_save (tt->store, kf, &err);
+  g_assert_no_error (err);
+  g_assert_true (ok);
+
+  loaded = bolt_store_config_load (tt->store, &err);
+  g_assert_no_error (err);
+  g_assert_nonnull (loaded);
+
+  tri = bolt_config_load_default_policy (loaded, &policy, &err);
+  g_assert_no_error (err);
+  g_assert (tri == TRI_NO);
+
+  /* */
+  bolt_config_set_auth_mode (kf, "WRONG");
+  ok = bolt_store_config_save (tt->store, kf, &err);
+  g_assert_no_error (err);
+  g_assert_true (ok);
+
+  g_clear_pointer (&loaded, g_key_file_unref);
+  loaded = bolt_store_config_load (tt->store, &err);
+  g_assert_no_error (err);
+  g_assert_nonnull (loaded);
+
+  tri = bolt_config_load_auth_mode (loaded, &authmode, &err);
+  g_assert_error (err, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS);
+  g_assert (tri == TRI_ERROR);
+  g_clear_pointer (&err, g_error_free);
+
+  /*  */
+  bolt_config_set_auth_mode (kf, "enabled");
+  ok = bolt_store_config_save (tt->store, kf, &err);
+  g_assert_no_error (err);
+  g_assert_true (ok);
+
+  g_clear_pointer (&loaded, g_key_file_unref);
+  loaded = bolt_store_config_load (tt->store, &err);
+  g_assert_no_error (err);
+  g_assert_nonnull (loaded);
+
+  tri = bolt_config_load_auth_mode (loaded, &authmode, &err);
+  g_assert_no_error (err);
+  g_assert (tri == TRI_YES);
+  g_assert_cmpuint (authmode, ==, BOLT_AUTH_ENABLED);
 }
 
 static void
@@ -319,6 +353,19 @@ test_key (TestStore *tt, gconstpointer user_data)
   g_assert_error (err, BOLT_ERROR, BOLT_ERROR_BADKEY);
   g_assert_null (loaded);
   g_clear_error (&err);
+
+  /* empty key file ("", or "\n") */
+  for (gssize i = 0; i < 2; i++)
+    {
+      ok = g_file_set_contents (p, "\n", i, &err);
+      g_assert_no_error (err);
+      g_assert_true (ok);
+
+      loaded = bolt_key_load_file (f, &err);
+      g_assert_error (err, BOLT_ERROR, BOLT_ERROR_NOKEY);
+      g_assert_null (loaded);
+      g_clear_error (&err);
+    }
 }
 
 static GLogWriterOutput
@@ -360,6 +407,272 @@ test_store_invalid_data (TestStore *tt, gconstpointer user_data)
   g_assert_error (err, BOLT_ERROR, BOLT_ERROR_FAILED);
 }
 
+static void
+test_store_times (TestStore *tt, gconstpointer user_data)
+{
+  g_autoptr(BoltDevice) dev = NULL;
+  g_autoptr(BoltDevice) stored = NULL;
+  g_autoptr(GError) error = NULL;
+  char uid[] = "fbc83890-e9bf-45e5-a777-b3728490989c";
+  guint64 authin = 574423871;
+  guint64 connin = 574416000;
+  guint64 authout;
+  guint64 connout;
+  gboolean ok;
+
+  dev = g_object_new (BOLT_TYPE_DEVICE,
+                      "uid", uid,
+                      "name", "Laptop",
+                      "vendor", "GNOME.org",
+                      "status", BOLT_STATUS_DISCONNECTED,
+                      "authtime", authin,
+                      "conntime", connin,
+                      NULL);
+
+  stored = bolt_store_get_device (tt->store, uid, &error);
+  g_assert_nonnull (error);
+  g_assert_true (bolt_err_notfound (error));
+  g_assert_null (stored);
+  g_clear_error (&error);
+
+  /* store the device with times */
+  ok = bolt_store_put_device (tt->store, dev,
+                              BOLT_POLICY_AUTO, NULL,
+                              &error);
+  g_assert_no_error (error);
+  g_assert_true (ok);
+
+  /* verify the store has recorded the times */
+  ok = bolt_store_get_time (tt->store,
+                            uid,
+                            "authtime",
+                            &authout,
+                            &error);
+
+  g_assert_no_error (error);
+  g_assert_true (ok);
+  g_assert_cmpuint (authout, ==, authin);
+
+  ok = bolt_store_get_time (tt->store,
+                            uid,
+                            "conntime",
+                            &connout,
+                            &error);
+
+  g_assert_no_error (error);
+  g_assert_true (ok);
+  g_assert_cmpuint (connout, ==, connin);
+
+  /* check a newly loaded device has the times */
+  stored = bolt_store_get_device (tt->store, uid, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (stored);
+
+  connout = bolt_device_get_conntime (stored);
+  authout = bolt_device_get_authtime (stored);
+
+  g_assert_cmpuint (connout, ==, connin);
+  g_assert_cmpuint (authout, ==, authin);
+
+  /* update the times */
+  connin = 8688720;
+  authin = 9207120;
+
+  ok = bolt_store_put_times (tt->store, uid, &error,
+                             "conntime", connin,
+                             "authtime", authin,
+                             NULL);
+  g_assert_no_error (error);
+  g_assert_true (ok);
+
+
+
+  /* verify via store */
+  ok = bolt_store_get_time (tt->store, uid,
+                            "authtime", &authout,
+                            &error);
+
+  g_assert_no_error (error);
+  g_assert_true (ok);
+  g_assert_cmpuint (authout, ==, authin);
+
+  ok = bolt_store_get_time (tt->store, uid,
+                            "conntime", &connout,
+                            &error);
+
+  g_assert_no_error (error);
+  g_assert_true (ok);
+  g_assert_cmpuint (connout, ==, connin);
+
+  authout = connout = 0;
+
+  bolt_store_get_times (tt->store, uid, &error,
+                        "authtime", &authout,
+                        "conntime", &connout,
+                        NULL);
+
+  g_assert_no_error (error);
+  g_assert_true (ok);
+  g_assert_cmpuint (connout, ==, connin);
+  g_assert_cmpuint (authout, ==, authin);
+
+  /* via the device loading */
+  g_clear_object (&stored);
+  stored = bolt_store_get_device (tt->store, uid, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (stored);
+
+  connout = bolt_device_get_conntime (stored);
+  authout = bolt_device_get_authtime (stored);
+
+  g_assert_cmpuint (connout, ==, connin);
+  g_assert_cmpuint (authout, ==, authin);
+
+
+  /* check property access */
+  connout = authout = 0;
+
+  g_object_get (stored,
+                "conntime", &connout,
+                "authtime", &authout,
+                NULL);
+
+  g_assert_cmpuint (connout, ==, connin);
+  g_assert_cmpuint (authout, ==, authin);
+
+  /* lets remove them again */
+  ok = bolt_store_del_time (tt->store, uid,
+                            "conntime",
+                            &error);
+
+  g_assert_no_error (error);
+  g_assert_true (ok);
+
+  connout = 0;
+  ok = bolt_store_get_time (tt->store, uid,
+                            "conntime", &connout,
+                            &error);
+
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+  g_assert_false (ok);
+  g_clear_error (&error);
+
+  /* the multiple timestamp version of del is
+   * ignoring not found errors */
+  ok = bolt_store_del_times (tt->store, uid, &error,
+                             "authtime", "conntime",
+                             NULL);
+
+  g_assert_no_error (error);
+  g_assert_true (ok);
+
+  connout = 0;
+  ok = bolt_store_get_time (tt->store, uid,
+                            "authtime", &connout,
+                            &error);
+
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+  g_assert_false (ok);
+  g_clear_error (&error);
+
+  /* check the time is not there, via the device loading */
+  g_clear_object (&stored);
+  stored = bolt_store_get_device (tt->store, uid, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (stored);
+
+  connout = bolt_device_get_conntime (stored);
+
+  g_assert_cmpuint (connout, ==, 0);
+}
+
+static void
+test_store_domain (TestStore *tt, gconstpointer user_data)
+{
+  g_autoptr(GError) err = NULL;
+  g_auto(GStrv) uids = NULL;
+  g_autoptr(BoltDomain) d1 = NULL;
+  g_autoptr(BoltDomain) s1 = NULL;
+  const char *uid = "884c6edd-7118-4b21-b186-b02d396ecca0";
+  gboolean ok;
+  GStrv bootacl = NULL;
+  const char *acl[16] = {
+    "884c6edd-7118-4b21-b186-b02d396ecca1",
+    "884c6edd-7118-4b21-b186-b02d396ecca2",
+    "",
+    "884c6edd-7118-4b21-b186-b02d396ecca3",
+    NULL,
+  };
+
+  uids = bolt_store_list_uids (tt->store, "domains", &err);
+
+  g_assert_no_error (err);
+  g_assert_nonnull (uids);
+  g_assert_cmpuint (g_strv_length (uids), ==, 0);
+
+  d1 = g_object_new (BOLT_TYPE_DOMAIN,
+                     "uid", uid,
+                     "bootacl", NULL,
+                     NULL);
+
+  g_assert_false (bolt_domain_is_stored (d1));
+  g_assert_false (bolt_domain_supports_bootacl (d1));
+
+  /* store */
+  ok = bolt_store_put_domain (tt->store, d1, &err);
+  g_assert_no_error (err);
+  g_assert_true (ok);
+  g_assert_true (bolt_domain_is_stored (d1));
+  g_assert_false (bolt_domain_supports_bootacl (d1));
+
+  g_clear_pointer (&uids, g_strfreev);
+
+  /* list */
+  uids = bolt_store_list_uids (tt->store, "domains", &err);
+  g_assert_no_error (err);
+  g_assert_nonnull (uids);
+  g_assert_cmpuint (g_strv_length (uids), ==, 1);
+
+  g_assert_cmpstr (uids[0], ==, uid);
+
+  /* get */
+  s1 = bolt_store_get_domain (tt->store, uid, &err);
+  g_assert_no_error (err);
+  g_assert_nonnull (s1);
+  g_assert_true (bolt_domain_is_stored (s1));
+  g_assert_false (bolt_domain_supports_bootacl (s1));
+
+  g_assert_cmpstr (uid, ==, bolt_domain_get_uid (s1));
+  bootacl = bolt_domain_get_bootacl (s1);
+  g_assert_null (bootacl);
+
+  /* update the bootacl */
+  g_object_set (d1, "bootacl", acl, NULL);
+  g_assert_true (bolt_domain_supports_bootacl (d1));
+
+  ok = bolt_store_put_domain (tt->store, d1, &err);
+  g_assert_no_error (err);
+  g_assert_true (ok);
+
+  /* update: get again after update */
+  g_clear_object (&s1);
+  s1 = bolt_store_get_domain (tt->store, uid, &err);
+  g_assert_no_error (err);
+  g_assert_nonnull (s1);
+  g_assert_true (bolt_domain_is_stored (s1));
+  g_assert_true (bolt_domain_supports_bootacl (d1));
+
+  bootacl = bolt_domain_get_bootacl (s1);
+  bolt_assert_strv_equal ((GStrv) acl, bootacl, 0);
+
+  /* delete */
+  g_assert_true (bolt_domain_is_stored (s1));
+  ok = bolt_store_del_domain (tt->store, s1, &err);
+  g_assert_no_error (err);
+  g_assert_true (ok);
+  g_assert_false (bolt_domain_is_stored (s1));
+}
+
 int
 main (int argc, char **argv)
 {
@@ -384,11 +697,32 @@ main (int argc, char **argv)
               test_store_basic,
               test_store_tear_down);
 
+  g_test_add ("/daemon/store/config",
+              TestStore,
+              NULL,
+              test_store_setup,
+              test_store_config,
+              test_store_tear_down);
+
   g_test_add ("/daemon/store/invalid_data",
               TestStore,
               NULL,
               test_store_setup,
               test_store_invalid_data,
+              test_store_tear_down);
+
+  g_test_add ("/daemon/store/times",
+              TestStore,
+              NULL,
+              test_store_setup,
+              test_store_times,
+              test_store_tear_down);
+
+  g_test_add ("/daemon/store/domain",
+              TestStore,
+              NULL,
+              test_store_setup,
+              test_store_domain,
               test_store_tear_down);
 
   return g_test_run ();

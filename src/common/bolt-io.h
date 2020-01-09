@@ -26,10 +26,15 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <unistd.h>
+
+#include "bolt-macros.h"
 
 G_BEGIN_DECLS
 
+/* *INDENT-OFF* */
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (DIR, closedir);
+/* *INDENT-ON* */
 
 int        bolt_open (const char *path,
                       int         flags,
@@ -50,6 +55,10 @@ gboolean   bolt_write_all (int         fd,
                            gssize      nbytes,
                            GError    **error);
 
+gboolean   bolt_ftruncate (int      fd,
+                           off_t    size,
+                           GError **error);
+
 DIR *      bolt_opendir (const char *path,
                          GError    **error);
 
@@ -67,6 +76,7 @@ gboolean   bolt_rmdir (const char *name,
 int        bolt_openat (int         dirfd,
                         const char *path,
                         int         oflag,
+                        int         mode,
                         GError    **error);
 
 gboolean   bolt_unlink (const char *name,
@@ -95,5 +105,49 @@ gboolean   bolt_verify_uid (int         dirfd,
                             const char *uid,
                             GError    **error);
 
+gboolean   bolt_file_write_all (const char *fn,
+                                const void *data,
+                                gssize      n,
+                                GError    **error);
+
+int        bolt_mkfifo (const char *path,
+                        mode_t      mode,
+                        GError    **error);
+
+gboolean   bolt_faddflags (int      fd,
+                           int      flags,
+                           GError **error);
+
+gboolean   bolt_fstat (int          fd,
+                       struct stat *statbuf,
+                       GError     **error);
+
+gboolean   bolt_fstatat (int          dirfd,
+                         const char  *pathname,
+                         struct stat *statbuf,
+                         int          flags,
+                         GError     **error);
+
+gboolean   bolt_fdatasync (int      fd,
+                           GError **error);
+
+gboolean   bolt_lseek (int      fd,
+                       off_t    offset,
+                       int      whence,
+                       int     *pos,
+                       GError **error);
+
+gboolean   bolt_rename (const char *from,
+                        const char *to,
+                        GError    **error);
+
+gboolean   bolt_copy_bytes (int      fd_from,
+                            int      fd_to,
+                            size_t   len,
+                            GError **error);
+
+/* auto cleanup for I/O handles */
+void       bolt_cleanup_close_intpr (int *fd);
+#define    bolt_autoclose bolt_cleanup (bolt_cleanup_close_intpr)
 
 G_END_DECLS

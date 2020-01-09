@@ -32,6 +32,12 @@ static void         handle_dbus_device_added (GObject    *self,
 static void         handle_dbus_device_removed (GObject    *self,
                                                 GDBusProxy *bus_proxy,
                                                 GVariant   *params);
+static void         handle_dbus_domain_added (GObject    *self,
+                                              GDBusProxy *bus_proxy,
+                                              GVariant   *params);
+static void         handle_dbus_domain_removed (GObject    *self,
+                                                GDBusProxy *bus_proxy,
+                                                GVariant   *params);
 
 struct _BoltClient
 {
@@ -44,8 +50,10 @@ enum {
   /* D-Bus Props */
   PROP_VERSION,
   PROP_PROBING,
+  PROP_POLICY,
   PROP_SECURITY,
   PROP_AUTHMODE,
+  PROP_POWERSTATE,
 
   PROP_LAST
 };
@@ -55,6 +63,8 @@ static GParamSpec *props[PROP_LAST] = {NULL, };
 enum {
   SIGNAL_DEVICE_ADDED,
   SIGNAL_DEVICE_REMOVED,
+  SIGNAL_DOMAIN_ADDED,
+  SIGNAL_DOMAIN_REMOVED,
   SIGNAL_LAST
 };
 
@@ -84,6 +94,8 @@ bolt_client_get_dbus_signals (guint *n)
   static BoltProxySignal dbus_signals[] = {
     {"DeviceAdded", handle_dbus_device_added},
     {"DeviceRemoved", handle_dbus_device_removed},
+    {"DomainAdded", handle_dbus_domain_added},
+    {"DomainRemoved", handle_dbus_domain_removed},
   };
 
   *n = G_N_ELEMENTS (dbus_signals);
@@ -116,6 +128,14 @@ bolt_client_class_init (BoltClientClass *klass)
                             G_PARAM_READABLE |
                             G_PARAM_STATIC_NAME);
 
+  props[PROP_POLICY]
+    = g_param_spec_enum ("default-policy",
+                         "DefaultPolicy", NULL,
+                         BOLT_TYPE_POLICY,
+                         BOLT_POLICY_UNKNOWN,
+                         G_PARAM_READABLE |
+                         G_PARAM_STATIC_NAME);
+
   props[PROP_SECURITY]
     = g_param_spec_enum ("security-level",
                          "SecurityLevel", NULL,
@@ -130,6 +150,14 @@ bolt_client_class_init (BoltClientClass *klass)
                         BOLT_AUTH_ENABLED,
                         G_PARAM_READABLE |
                         G_PARAM_STATIC_STRINGS);
+
+  props[PROP_POWERSTATE] =
+    g_param_spec_enum ("power-state",
+                       "PowerState", NULL,
+                       BOLT_TYPE_POWER_STATE,
+                       BOLT_FORCE_POWER_UNSET,
+                       G_PARAM_READABLE |
+                       G_PARAM_STATIC_NAME);
 
   g_object_class_install_properties (gobject_class,
                                      PROP_LAST,
@@ -155,12 +183,39 @@ bolt_client_class_init (BoltClientClass *klass)
                   NULL,
                   G_TYPE_NONE,
                   1, G_TYPE_STRING);
+
+  signals[SIGNAL_DOMAIN_ADDED] =
+    g_signal_new ("domain-added",
+                  G_TYPE_FROM_CLASS (gobject_class),
+                  G_SIGNAL_RUN_LAST,
+                  0,
+                  NULL, NULL,
+                  NULL,
+                  G_TYPE_NONE,
+                  1, G_TYPE_STRING);
+
+  signals[SIGNAL_DOMAIN_REMOVED] =
+    g_signal_new ("domain-removed",
+                  G_TYPE_FROM_CLASS (gobject_class),
+                  G_SIGNAL_RUN_LAST,
+                  0,
+                  NULL, NULL,
+                  NULL,
+                  G_TYPE_NONE,
+                  1, G_TYPE_STRING);
 }
 
 
 static void
 bolt_client_init (BoltClient *cli)
 {
+  /* we don't want this to be optimized away */
+  volatile GQuark error_domain;
+
+  /* initialize error mapping */
+  error_domain = BOLT_ERROR;
+  (error_domain); /* To avoid -Wunused-but-set-variable */
+
 }
 
 /* dbus signals */
@@ -185,6 +240,27 @@ handle_dbus_device_removed (GObject *self, GDBusProxy *bus_proxy, GVariant *para
   g_signal_emit (cli, signals[SIGNAL_DEVICE_REMOVED], 0, opath);
 }
 
+static void
+handle_dbus_domain_added (GObject *self, GDBusProxy *bus_proxy, GVariant *params)
+{
+  BoltClient *cli = BOLT_CLIENT (self);
+  const char *opath = NULL;
+
+  g_variant_get_child (params, 0, "&o", &opath);
+  g_signal_emit (cli, signals[SIGNAL_DOMAIN_ADDED], 0, opath);
+}
+
+static void
+handle_dbus_domain_removed (GObject *self, GDBusProxy *bus_proxy, GVariant *params)
+{
+  BoltClient *cli = BOLT_CLIENT (self);
+  const char *opath = NULL;
+
+  g_variant_get_child (params, 0, "&o", &opath);
+  g_signal_emit (cli, signals[SIGNAL_DOMAIN_REMOVED], 0, opath);
+}
+
+
 /* public methods */
 
 BoltClient *
@@ -192,6 +268,8 @@ bolt_client_new (GError **error)
 {
   BoltClient *cli;
   GDBusConnection *bus;
+
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
 
   bus = g_bus_get_sync (G_BUS_TYPE_SYSTEM, NULL, error);
   if (bus == NULL)
@@ -274,6 +352,9 @@ bolt_client_new_async (GCancellable       *cancellable,
 {
   GTask *task;
 
+  g_return_if_fail (!cancellable || G_IS_CANCELLABLE (cancellable));
+  g_return_if_fail (callback == NULL);
+
   task = g_task_new (NULL, cancellable, callback, user_data);
   g_bus_get (G_BUS_TYPE_SYSTEM, cancellable, got_the_bus, task);
 }
@@ -283,8 +364,53 @@ bolt_client_new_finish (GAsyncResult *res,
                         GError      **error)
 {
   g_return_val_if_fail (G_IS_TASK (res), NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
 
   return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+GPtrArray *
+bolt_client_list_domains (BoltClient   *client,
+                          GCancellable *cancel,
+                          GError      **error)
+{
+  g_autoptr(GVariant) val = NULL;
+  g_autoptr(GPtrArray) domains = NULL;
+  g_autoptr(GVariantIter) iter = NULL;
+  GDBusConnection *bus = NULL;
+  const char *d;
+
+  g_return_val_if_fail (BOLT_IS_CLIENT (client), NULL);
+  g_return_val_if_fail (!cancel || G_IS_CANCELLABLE (cancel), NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
+
+  val = g_dbus_proxy_call_sync (G_DBUS_PROXY (client),
+                                "ListDomains",
+                                NULL,
+                                G_DBUS_CALL_FLAGS_NONE,
+                                -1,
+                                cancel,
+                                error);
+  if (val == NULL)
+    return NULL;
+
+  bus = g_dbus_proxy_get_connection (G_DBUS_PROXY (client));
+
+  domains = g_ptr_array_new_with_free_func (g_object_unref);
+
+  g_variant_get (val, "(ao)", &iter);
+  while (g_variant_iter_loop (iter, "&o", &d, NULL))
+    {
+      BoltDomain *dom;
+
+      dom = bolt_domain_new_for_object_path (bus, d, cancel, error);
+      if (dom == NULL)
+        return NULL;
+
+      g_ptr_array_add (domains, dom);
+    }
+
+  return g_steal_pointer (&domains);
 }
 
 GPtrArray *
@@ -299,6 +425,8 @@ bolt_client_list_devices (BoltClient   *client,
   const char *d;
 
   g_return_val_if_fail (BOLT_IS_CLIENT (client), NULL);
+  g_return_val_if_fail (!cancel || G_IS_CANCELLABLE (cancel), NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
 
   val = g_dbus_proxy_call_sync (G_DBUS_PROXY (client),
                                 "ListDevices",
@@ -342,6 +470,9 @@ bolt_client_get_device (BoltClient   *client,
   const char *opath = NULL;
 
   g_return_val_if_fail (BOLT_IS_CLIENT (client), NULL);
+  g_return_val_if_fail (uid != NULL, NULL);
+  g_return_val_if_fail (!cancel || G_IS_CANCELLABLE (cancel), NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
 
   val = g_dbus_proxy_call_sync (G_DBUS_PROXY (client),
                                 "DeviceByUid",
@@ -384,6 +515,8 @@ bolt_client_enroll_device (BoltClient  *client,
   const char *pstr;
 
   g_return_val_if_fail (BOLT_IS_CLIENT (client), NULL);
+  g_return_val_if_fail (uid != NULL, NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
 
   pstr = bolt_enum_to_string (BOLT_TYPE_POLICY, policy, error);
   if (pstr == NULL)
@@ -434,6 +567,8 @@ bolt_client_enroll_device_async (BoltClient         *client,
 
   g_return_if_fail (BOLT_IS_CLIENT (client));
   g_return_if_fail (uid != NULL);
+  g_return_if_fail (!cancellable || G_IS_CANCELLABLE (cancellable));
+  g_return_if_fail (callback == NULL);
 
   pstr = bolt_enum_to_string (BOLT_TYPE_POLICY, policy, &err);
   if (pstr == NULL)
@@ -466,11 +601,12 @@ bolt_client_enroll_device_finish (BoltClient   *client,
                                   char        **path,
                                   GError      **error)
 {
+  g_autoptr(GError) err = NULL;
   GVariant *val = NULL;
 
-  g_autoptr(GError) err = NULL;
-
   g_return_val_if_fail (BOLT_IS_CLIENT (client), FALSE);
+  g_return_val_if_fail (G_IS_ASYNC_RESULT (res), FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   val = g_dbus_proxy_call_finish (G_DBUS_PROXY (client), res, &err);
   if (val == NULL)
@@ -494,6 +630,8 @@ bolt_client_forget_device (BoltClient *client,
   g_autoptr(GError) err = NULL;
 
   g_return_val_if_fail (BOLT_IS_CLIENT (client), FALSE);
+  g_return_val_if_fail (uid != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   val = g_dbus_proxy_call_sync (G_DBUS_PROXY (client),
                                 "ForgetDevice",
@@ -520,6 +658,9 @@ bolt_client_forget_device_async (BoltClient         *client,
                                  gpointer            user_data)
 {
   g_return_if_fail (BOLT_IS_CLIENT (client));
+  g_return_if_fail (uid == NULL);
+  g_return_if_fail (!cancellable || G_IS_CANCELLABLE (cancellable));
+  g_return_if_fail (callback == NULL);
 
   g_dbus_proxy_call (G_DBUS_PROXY (client),
                      "ForgetDevice",
@@ -540,6 +681,8 @@ bolt_client_forget_device_finish (BoltClient   *client,
   g_autoptr(GError) err = NULL;
 
   g_return_val_if_fail (BOLT_IS_CLIENT (client), FALSE);
+  g_return_val_if_fail (G_IS_ASYNC_RESULT (res), FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   val = g_dbus_proxy_call_finish (G_DBUS_PROXY (client), res, &err);
   if (val == NULL)
@@ -549,6 +692,21 @@ bolt_client_forget_device_finish (BoltClient   *client,
     }
 
   return TRUE;
+}
+
+BoltPower *
+bolt_client_new_power_client (BoltClient   *client,
+                              GCancellable *cancellable,
+                              GError      **error)
+{
+  GDBusConnection *bus = NULL;
+
+  g_return_val_if_fail (BOLT_IS_CLIENT (client), NULL);
+  g_return_val_if_fail (!cancellable || G_IS_CANCELLABLE (cancellable), NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
+
+  bus = g_dbus_proxy_get_connection (G_DBUS_PROXY (client));
+  return bolt_power_new_for_object_path (bus, cancellable, error);
 }
 
 /* getter */
@@ -581,6 +739,24 @@ bolt_client_is_probing (BoltClient *client)
 
   key = g_param_spec_get_name (props[PROP_PROBING]);
   ok = bolt_proxy_get_property_bool (BOLT_PROXY (client), key, &val);
+
+  if (!ok)
+    g_warning ("failed to get enum property '%s'", key);
+
+  return val;
+}
+
+BoltPolicy
+bolt_client_get_policy (BoltClient *client)
+{
+  const char *key;
+  gboolean ok;
+  gint val = BOLT_POLICY_UNKNOWN;
+
+  g_return_val_if_fail (BOLT_IS_CLIENT (client), val);
+
+  key = g_param_spec_get_name (props[PROP_POLICY]);
+  ok = bolt_proxy_get_property_enum (BOLT_PROXY (client), key, &val);
 
   if (!ok)
     g_warning ("failed to get enum property '%s'", key);
@@ -624,6 +800,24 @@ bolt_client_get_authmode (BoltClient *client)
   return val;
 }
 
+BoltPowerState
+bolt_client_get_power_state (BoltClient *client)
+{
+  const char *key;
+  gboolean ok;
+  gint val = BOLT_FORCE_POWER_UNSET;
+
+  g_return_val_if_fail (BOLT_IS_CLIENT (client), val);
+
+  key = g_param_spec_get_name (props[PROP_POWERSTATE]);
+  ok = bolt_proxy_get_property_enum (BOLT_PROXY (client), key, &val);
+
+  if (!ok)
+    g_warning ("failed to get enum property '%s'", key);
+
+  return val;
+}
+
 void
 bolt_client_set_authmode_async (BoltClient         *client,
                                 BoltAuthMode        mode,
@@ -636,6 +830,10 @@ bolt_client_set_authmode_async (BoltClient         *client,
   GParamSpec *pspec;
   GParamSpecFlags *flags_pspec;
   GFlagsClass *flags_class;
+
+  g_return_if_fail (BOLT_IS_CLIENT (client));
+  g_return_if_fail (!cancellable || G_IS_CANCELLABLE (cancellable));
+  g_return_if_fail (callback != NULL);
 
   pspec = props[PROP_AUTHMODE];
   flags_pspec = G_PARAM_SPEC_FLAGS (pspec);
@@ -661,6 +859,10 @@ bolt_client_set_authmode_finish (BoltClient   *client,
                                  GAsyncResult *res,
                                  GError      **error)
 {
+  g_return_val_if_fail (BOLT_IS_CLIENT (client), FALSE);
+  g_return_val_if_fail (G_IS_ASYNC_RESULT (res), FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
   return bolt_proxy_set_property_finish (res, error);
 }
 

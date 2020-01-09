@@ -22,6 +22,7 @@
 
 #include "bolt-auth.h"
 #include "bolt-device.h"
+#include "bolt-error.h"
 #include "bolt-io.h"
 #include "bolt-log.h"
 #include "bolt-store.h"
@@ -204,12 +205,16 @@ bolt_auth_class_init (BoltAuthClass *klass)
 static gpointer
 async_result_get_user_data (GAsyncResult *res)
 {
+  g_return_val_if_fail (G_IS_ASYNC_RESULT (res), NULL);
+
   return NULL;
 }
 
 static GObject *
 async_result_get_source_object (GAsyncResult *res)
 {
+  g_return_val_if_fail (G_IS_ASYNC_RESULT (res), NULL);
+
   return G_OBJECT (BOLT_AUTH (res)->dev);
 }
 
@@ -217,6 +222,8 @@ static gboolean
 async_result_is_tagged (GAsyncResult *res,
                         gpointer      source_tag)
 {
+  g_return_val_if_fail (G_IS_ASYNC_RESULT (res), FALSE);
+
   return FALSE;
 }
 
@@ -256,6 +263,8 @@ bolt_auth_return_new_error (BoltAuth   *auth,
 {
   va_list args;
 
+  g_return_if_fail (BOLT_IS_AUTH (auth));
+
   va_start (args, format);
   auth->error = g_error_new_valist (domain, code, format, args);
   va_end (args);
@@ -265,6 +274,7 @@ void
 bolt_auth_return_error (BoltAuth *auth,
                         GError  **error)
 {
+  g_return_if_fail (BOLT_IS_AUTH (auth));
   g_return_if_fail (error != NULL && *error != NULL);
   g_return_if_fail (auth->error == NULL);
 
@@ -275,12 +285,13 @@ gboolean
 bolt_auth_check (BoltAuth *auth,
                  GError  **error)
 {
+  g_return_val_if_fail (BOLT_IS_AUTH (auth), FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   if (auth->error)
     {
       g_autoptr(GError) err = g_error_copy (auth->error);
-      g_propagate_error (error, g_steal_pointer (&err));
-      return FALSE;
+      return bolt_error_propagate (error, &err);
     }
 
   return TRUE;
@@ -290,18 +301,32 @@ bolt_auth_check (BoltAuth *auth,
 BoltSecurity
 bolt_auth_get_level (BoltAuth *auth)
 {
+  g_return_val_if_fail (BOLT_IS_AUTH (auth), BOLT_SECURITY_UNKNOWN);
+
   return auth->level;
 }
 
 BoltKey *
 bolt_auth_get_key (BoltAuth *auth)
 {
+  g_return_val_if_fail (BOLT_IS_AUTH (auth), NULL);
+
   return auth->key;
+}
+
+BoltKeyState
+bolt_auth_get_keystate (BoltAuth *auth)
+{
+  g_return_val_if_fail (BOLT_IS_AUTH (auth), BOLT_KEY_MISSING);
+
+  return bolt_key_get_state (auth->key);
 }
 
 gpointer
 bolt_auth_get_origin (BoltAuth *auth)
 {
+  g_return_val_if_fail (BOLT_IS_AUTH (auth), NULL);
+
   return auth->origin;
 }
 

@@ -45,6 +45,7 @@ enum {
   PROP_AUTHFLAGS,
   PROP_PARENT,
   PROP_SYSPATH,
+  PROP_DOMAIN,
   PROP_CONNTIME,
   PROP_AUTHTIME,
 
@@ -141,6 +142,14 @@ bolt_device_class_init (BoltDeviceClass *klass)
                          G_PARAM_READABLE |
                          G_PARAM_STATIC_NICK);
 
+  props[PROP_DOMAIN] =
+    g_param_spec_string ("domain",
+                         "Domain", NULL,
+                         "unknown",
+                         G_PARAM_READABLE |
+                         G_PARAM_STATIC_NICK);
+
+
   props[PROP_CONNTIME] =
     g_param_spec_uint64 ("conntime",
                          "ConnectTime", NULL,
@@ -213,6 +222,11 @@ bolt_device_new_for_object_path (GDBusConnection *bus,
 {
   BoltDevice *dev;
 
+  g_return_val_if_fail (G_IS_DBUS_CONNECTION (bus), NULL);
+  g_return_val_if_fail (path != NULL, NULL);
+  g_return_val_if_fail (!cancel || G_IS_CANCELLABLE (cancel), NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
+
   dev = g_initable_new (BOLT_TYPE_DEVICE,
                         cancel, error,
                         "g-flags", G_DBUS_PROXY_FLAGS_NONE,
@@ -235,6 +249,8 @@ bolt_device_authorize (BoltDevice   *dev,
   g_autofree char *fstr = NULL;
 
   g_return_val_if_fail (BOLT_IS_DEVICE (dev), FALSE);
+  g_return_val_if_fail (!cancel || G_IS_CANCELLABLE (cancel), FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   fstr = bolt_flags_to_string (BOLT_TYPE_AUTH_CTRL, flags, error);
   if (fstr == NULL)
@@ -265,6 +281,8 @@ bolt_device_authorize_async (BoltDevice         *dev,
   g_autofree char *fstr = NULL;
 
   g_return_if_fail (BOLT_IS_DEVICE (dev));
+  g_return_if_fail (!cancellable || G_IS_CANCELLABLE (cancellable));
+  g_return_if_fail (callback != NULL);
 
   fstr = bolt_flags_to_string (BOLT_TYPE_AUTH_CTRL, flags, &err);
   if (fstr == NULL)
@@ -292,6 +310,8 @@ bolt_device_authorize_finish (BoltDevice   *dev,
   g_autoptr(GVariant) val = NULL;
 
   g_return_val_if_fail (BOLT_IS_DEVICE (dev), FALSE);
+  g_return_val_if_fail (G_IS_ASYNC_RESULT (res), FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   val = g_dbus_proxy_call_finish (G_DBUS_PROXY (dev), res, &err);
   if (val == NULL)
@@ -427,6 +447,19 @@ bolt_device_get_syspath (BoltDevice *dev)
   return str;
 }
 
+const char *
+bolt_device_get_domain (BoltDevice *dev)
+{
+  const char *key;
+  const char *str;
+
+  g_return_val_if_fail (BOLT_IS_DEVICE (dev), NULL);
+
+  key = g_param_spec_get_name (props[PROP_DOMAIN]);
+  str = bolt_proxy_get_property_string (BOLT_PROXY (dev), key);
+
+  return str;
+}
 guint64
 bolt_device_get_conntime (BoltDevice *dev)
 {

@@ -1,8 +1,8 @@
 project('bolt',
   'c',
-  version: '0.4',
+  version: '0.7',
   license : 'LGPL-2.1+',
-  meson_version: '>= 0.42.0',
+  meson_version: '>= 0.44.0',
   default_options: ['warning_level=1',
                     'c_std=gnu99',
                     'buildtype=debugoptimized'])
@@ -76,8 +76,7 @@ libudev = dependency('libudev')
 unix    = dependency('gio-unix-2.0')
 udev    = dependency('udev')
 polkit  = dependency('polkit-gobject-1')
-systemd = dependency('systemd')
-libsysd = dependency('libsystemd')
+mockdev = dependency('umockdev-1.0', required: false)
 
 git     = find_program('git', required: false)
 a2x     = find_program(['a2x', 'a2x.py'], required: req_man)
@@ -90,12 +89,23 @@ srcdir = meson.source_root()
 bindir = join_paths(prefixdir, get_option('bindir'))
 libexecdir = join_paths(prefixdir, get_option('libexecdir'))
 datadir = join_paths(prefixdir, get_option('datadir'))
-sysconfdir = get_option('sysconfdir')
+sysconfdir = join_paths(prefixdir, get_option('sysconfdir'))
+statedir = get_option('localstatedir')
 mandir = get_option('mandir')
 
-dbdir = get_option('db-path')
+if get_option('db-path') != ''
+  warning('db-path option is set, but will be ignored')
+endif
+
+dbname = get_option('db-name')
+dbdir = join_paths(statedir, 'lib', dbname)
 udevdir = udev.get_pkgconfig_variable('udevdir')
-unitdir = systemd.get_pkgconfig_variable('systemdsystemunitdir')
+
+unitdir = ''
+systemd = dependency('systemd', required: false)
+if systemd.found()
+  unitdir = systemd.get_pkgconfig_variable('systemdsystemunitdir')
+endif
 
 version_split = meson.project_version().split('.')
 version_major = version_split[0]
@@ -106,6 +116,7 @@ conf.set_quoted('VERSION', meson.project_version())
 conf.set_quoted('PACKAGE_NAME', meson.project_name())
 conf.set_quoted('PACKAGE_VERSION', meson.project_version())
 conf.set_quoted('DATADIR', datadir)
+conf.set_quoted('BOLT_DBNAME', dbname)
 conf.set_quoted('BOLT_DBDIR', dbdir)
 
 conf.set('VERSION_MAJOR', version_major)
@@ -114,11 +125,12 @@ conf.set('VERSION_MINOR', version_minor)
 conf.set('_GNU_SOURCE', true)
 
 foreach fn : [
-  ['explicit_bzero', '''#include <string.h>'''],
-  ['getrandom',      '''#include <sys/random.h>''']
+  ['copy_file_range', '''#include <unistd.h>'''],
+  ['explicit_bzero',  '''#include <string.h>'''],
+  ['getrandom',       '''#include <sys/random.h>'''],
 ]
 
-  have = compiler.has_function(fn[0], prefix : fn[1])
+  have = compiler.has_function(fn[0], prefix: fn[1], args: '-D_GNU_SOURCE')
   conf.set10('HAVE_FN_' + fn[0].to_upper(), have)
 endforeach
 
@@ -126,12 +138,18 @@ if polkit.version().version_compare('>= 0.114')
   conf.set('HAVE_POLKIT_AUTOPTR', '1')
 endif
 
-config_h = configure_file(output: 'config.h', configuration: conf)
+conf.set('IS_COVERITY_BUILD', get_option('coverity'))
+
+config_h = configure_file(
+  input: 'config.h.in',
+  output: 'config.h',
+  configuration: conf)
 
 cargs = ['-DG_LOG_DOMAIN="bolt"']
 
 privileged_group = get_option('privileged-group')
 subs = configuration_data()
+subs.set('dbname', dbname)
 subs.set('dbdir', dbdir)
 subs.set('libexecdir', libexecdir)
 subs.set('privileged_group', privileged_group)
@@ -171,7 +189,8 @@ common_sources = [
   'common/bolt-rnd.c',
   'common/bolt-str.c',
   'common/bolt-term.c',
-  'common/bolt-time.c'
+  'common/bolt-time.c',
+  'common/bolt-unix.c'
 ]
 
 common_enums = gnome.mkenums_simple('bolt-enum-types',
@@ -202,14 +221,17 @@ daemon_sources = files([
   'boltd/bolt-auth.c',
   'boltd/bolt-bouncer.c',
   'boltd/bolt-config.c',
+  'boltd/bolt-domain.c',
   'boltd/bolt-exported.c',
+  'boltd/bolt-journal.c',
   'boltd/bolt-manager.c',
   'boltd/bolt-power.c',
   'boltd/bolt-device.c',
   'boltd/bolt-key.c',
   'boltd/bolt-log.c',
   'boltd/bolt-store.c',
-  'boltd/bolt-sysfs.c'
+  'boltd/bolt-sysfs.c',
+  'boltd/bolt-udev.c'
 ])
 
 daemon_sources += gnome.compile_resources(
@@ -262,9 +284,11 @@ unit_file = configure_file(
   configuration: subs
 )
 
-install_data(unit_file,
-  install_dir: unitdir
-)
+if unitdir != ''
+  install_data(unit_file,
+    install_dir: unitdir
+  )
+endif
 
 install_data('data/90-bolt.rules',
   install_dir: join_paths(udevdir, 'rules.d')
@@ -274,7 +298,6 @@ daemon_deps = [
   glib,
   gio,
   libudev,
-  libsysd,
   polkit,
   unix,
   common
@@ -311,7 +334,18 @@ executable('boltd',
 executable('boltctl',
    ['cli/bolt-client.c',
     'cli/bolt-device.c',
+    'cli/bolt-domain.c',
+    'cli/bolt-power.c',
     'cli/bolt-proxy.c',
+    'cli/boltctl-authorize.c',
+    'cli/boltctl-domains.c',
+    'cli/boltctl-enroll.c',
+    'cli/boltctl-forget.c',
+    'cli/boltctl-info.c',
+    'cli/boltctl-list.c',
+    'cli/boltctl-monitor.c',
+    'cli/boltctl-power.c',
+    'cli/boltctl-uidfmt.c',
     'cli/boltctl.c'],
   dependencies: [glib,
                  gio,
@@ -336,16 +370,37 @@ test_enums = gnome.mkenums_simple(
   sources: ['tests/test-enums.h'])
 
 tests = [
+  ['test-auth', [libdaemon]],
   ['test-common', [], test_enums],
-  ['test-exported', [libdaemon], [test_resources]],
+  ['test-unix'],
+  ['test-device', [libdaemon]],
+  ['test-exported', [libdaemon], [test_resources,
+                                  test_enums]],
   ['test-logging', [libdaemon]],
-  ['test-store', [libdaemon]]
+  ['test-store', [libdaemon]],
+  ['test-journal', [libdaemon]],
 ]
+
+if mockdev.found()
+  tests += [
+    ['test-power',
+     [libdaemon, mockdev],
+     ['tests/mock-sysfs.c']],
+    ['test-sysfs',
+     [libdaemon, mockdev],
+     ['tests/mock-sysfs.c']],
+    ['test-udev',
+     [libdaemon, mockdev],
+     ['tests/mock-sysfs.c']]
+  ]
+endif
 
 foreach t: tests
   test_name = t.get(0)
   test_deps = [common] + t.get(1, [])
-  test_srcs = ['tests/@0@.c'.format(test_name), t.get(2, [])]
+  test_srcs = ['tests/@0@.c'.format(test_name),
+               'tests/bolt-test.c',
+               t.get(2, [])]
   test_exec = executable(
     test_name,
     test_srcs,
@@ -355,8 +410,12 @@ foreach t: tests
     ])
 
   test_env = environment()
-  test(test_name, test_exec, env: test_env, timeout: 120)
 
+  if test_deps.contains(mockdev)
+    test_env.prepend('LD_PRELOAD', 'libumockdev-preload.so.0')
+  endif
+
+  test(test_name, test_exec, env: test_env, timeout: 120)
 endforeach
 
 test_it = find_program(join_paths(srcdir, 'tests', 'test-integration'))
@@ -366,18 +425,15 @@ if res.returncode() == 0
   test_env.prepend('LD_PRELOAD', 'libumockdev-preload.so.0')
   test_env.prepend('BOLT_BUILD_DIR', meson.current_build_dir())
 
-  tests = res.stdout().strip().split(' ')
+  tests = res.stdout().strip().split('\n')
   foreach t: tests
-    name = 'integration @0@'.format(t.split('.')[1])
-    test(name, test_it, args: [t], env: test_env, timeout: 120)
+    args = t.split(' ')
+    name = 'integration @0@'.format(args[1])
+    test(name, test_it, args: [args[0]], env: test_env, timeout: 120)
   endforeach
 else
   msg = '@0@'.format(res.stderr().strip())
-  if meson.version().version_compare('<0.44.0')
-    message(msg)
-  else
-    warning(msg)
-  endif
+  warning(msg)
 endif
 
 # contrib
@@ -433,6 +489,9 @@ run_target('uncrustify',
 
 msg = ['',
   'version:             @0@'.format(meson.project_version()),
+  'sysconfdir:          @0@'.format(sysconfdir),
+  'statedir:            @0@'.format(statedir),
+  'db name:             @0@'.format(dbname),
   'database path:       @0@'.format(dbdir),
   'privileged group:    @0@'.format(privileged_group),
   '',

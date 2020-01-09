@@ -23,11 +23,12 @@
 #include <glib-object.h>
 
 #include "bolt-device.h"
-#include "bolt-key.h"
+#include "bolt-domain.h"
 #include "bolt-enums.h"
+#include "bolt-key.h"
+#include "bolt-journal.h"
 
 G_BEGIN_DECLS
-
 
 /* BoltStore - database for devices, keys */
 #define BOLT_TYPE_STORE bolt_store_get_type ()
@@ -42,8 +43,21 @@ gboolean          bolt_store_config_save (BoltStore *store,
                                           GKeyFile  *config,
                                           GError   **error);
 
-GStrv             bolt_store_list_uids (BoltStore *store,
-                                        GError   **error);
+GStrv             bolt_store_list_uids (BoltStore  *store,
+                                        const char *type,
+                                        GError    **error);
+
+gboolean          bolt_store_put_domain (BoltStore  *store,
+                                         BoltDomain *domain,
+                                         GError    **error);
+
+BoltDomain *      bolt_store_get_domain (BoltStore  *store,
+                                         const char *uid,
+                                         GError    **error);
+
+gboolean          bolt_store_del_domain (BoltStore  *store,
+                                         BoltDomain *domain,
+                                         GError    **error);
 
 gboolean          bolt_store_del (BoltStore  *store,
                                   BoltDevice *dev,
@@ -63,6 +77,43 @@ gboolean          bolt_store_del_device (BoltStore  *store,
                                          const char *uid,
                                          GError    **error);
 
+gboolean          bolt_store_put_time (BoltStore  *store,
+                                       const char *uid,
+                                       const char *timesel,
+                                       guint64     val,
+                                       GError    **error);
+
+gboolean          bolt_store_put_times (BoltStore  *store,
+                                        const char *uid,
+                                        GError    **error,
+                                        ...) G_GNUC_NULL_TERMINATED;
+
+gboolean          bolt_store_get_time (BoltStore  *store,
+                                       const char *uid,
+                                       const char *timesel,
+                                       guint64    *outval,
+                                       GError    **error);
+
+gboolean          bolt_store_get_times (BoltStore  *store,
+                                        const char *uid,
+                                        GError    **error,
+                                        ...) G_GNUC_NULL_TERMINATED;
+
+gboolean          bolt_store_del_time (BoltStore  *store,
+                                       const char *uid,
+                                       const char *timesel,
+                                       GError    **error);
+
+gboolean          bolt_store_del_times (BoltStore  *store,
+                                        const char *uid,
+                                        GError    **error,
+                                        ...) G_GNUC_NULL_TERMINATED;
+
+gboolean          bolt_store_put_key (BoltStore  *store,
+                                      const char *uid,
+                                      BoltKey    *key,
+                                      GError    **error);
+
 BoltKeyState      bolt_store_have_key (BoltStore  *store,
                                        const char *uid);
 
@@ -73,5 +124,10 @@ BoltKey *         bolt_store_get_key (BoltStore  *store,
 gboolean          bolt_store_del_key (BoltStore  *store,
                                       const char *uid,
                                       GError    **error);
+
+BoltJournal *     bolt_store_open_journal (BoltStore  *store,
+                                           const char *type,
+                                           const char *name,
+                                           GError    **error);
 
 G_END_DECLS

@@ -27,6 +27,23 @@ relative to the build directory):
 
 	VALGRIND=../bolt.supp meson test -C build --verbose
 
+Coverage
+--------
+
+To analyze the current code coverage either `lcov` or `gcovr` need
+to be installed. Support must also be enabled during configure time:
+
+	meson -Db_coverage=true <buildir>
+
+This should enable the general `coverage` target as well as the
+`coverage-{text, html, xml}` targets:
+
+	ninja -C <builddir> coverage
+
+To manually invoke `gcovr` and exclude the `cli` directory use:
+
+	gcovr -r <builddir> -e cli -s
+
 Static analysis
 ===============
 
@@ -41,7 +58,7 @@ Bolt is registerd with [coverity][coverity]. To submit a local build,
 execute the following commands (the `cov-build` [build tool][cov-build]
 must be in `PATH`) from the source directory:
 
-	meson coverity
+	CC=gcc CXX=gcc meson -Dcoverity=true coverity
 	cov-build --dir cov-int ninja -C coverity
 	tar caf bolt.xz cov-int
 

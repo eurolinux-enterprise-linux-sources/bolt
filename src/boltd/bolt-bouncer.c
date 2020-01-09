@@ -93,7 +93,9 @@ bouncer_initialize (GInitable    *initable,
 {
   BoltBouncer *bnc = BOLT_BOUNCER (initable);
 
+  bolt_info (LOG_TOPIC ("bouncer"), "initializing polkit");
   bnc->authority = polkit_authority_get_sync (cancellable, error);
+
   return bnc->authority != NULL;
 }
 
@@ -159,9 +161,17 @@ handle_authorize_method (BoltExported          *exported,
     action = "org.freedesktop.bolt.authorize";
   else if (bolt_streq (method_name, "ForgetDevice"))
     action = "org.freedesktop.bolt.manage";
+  else if (bolt_streq (method_name, "ForcePower"))
+    action = "org.freedesktop.bolt.manage";
+  else if (bolt_streq (method_name, "ListDomains"))
+    authorized = TRUE;
+  else if (bolt_streq (method_name, "DomainById"))
+    authorized = TRUE;
   else if (bolt_streq (method_name, "ListDevices"))
     authorized = TRUE;
   else if (bolt_streq (method_name, "DeviceByUid"))
+    authorized = TRUE;
+  else if (bolt_streq (method_name, "ListGuards"))
     authorized = TRUE;
 
   if (!authorized && action)
@@ -250,17 +260,15 @@ void
 bolt_bouncer_add_client (BoltBouncer *bnc,
                          gpointer     client)
 {
-  if (BOLT_IS_EXPORTED (client))
-    {
-      g_signal_connect_object (client, "authorize-method",
-                               G_CALLBACK (handle_authorize_method),
-                               bnc, 0);
-      g_signal_connect_object (client, "authorize-property",
-                               G_CALLBACK (handle_authorize_property),
-                               bnc, 0);
-    }
-  else
-    {
-      bolt_critical (LOG_TOPIC ("bouncer"), "unknown client class");
-    }
+
+  g_return_if_fail (BOLT_IS_BOUNCER (bnc));
+  g_return_if_fail (BOLT_IS_EXPORTED (client));
+
+  g_signal_connect_object (client, "authorize-method",
+                           G_CALLBACK (handle_authorize_method),
+                           bnc, 0);
+
+  g_signal_connect_object (client, "authorize-property",
+                           G_CALLBACK (handle_authorize_property),
+                           bnc, 0);
 }

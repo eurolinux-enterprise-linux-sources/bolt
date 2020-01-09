@@ -25,7 +25,7 @@
 
 #include <gio/gio.h>
 
-#if !GLIB_CHECK_VERSION(2, 57, 0)
+#if !GLIB_CHECK_VERSION (2, 57, 0)
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (GEnumClass, g_type_class_unref);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (GFlagsClass, g_type_class_unref);
 #endif
@@ -38,15 +38,8 @@ bolt_enum_class_validate (GEnumClass *enum_class,
   const char *name;
   gboolean oob;
 
-  if (enum_class == NULL)
-    {
-      name = g_type_name_from_class ((GTypeClass *) enum_class);
-      g_set_error (error, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS,
-                   "could not determine enum class for '%s'",
-                   name);
-
-      return FALSE;
-    }
+  g_return_val_if_fail (G_IS_ENUM_CLASS (enum_class), FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   oob = value < enum_class->minimum || value > enum_class->maximum;
 
@@ -67,19 +60,25 @@ bolt_enum_validate (GType    enum_type,
                     gint     value,
                     GError **error)
 {
-  g_autoptr(GEnumClass) klass = g_type_class_ref (enum_type);
+  g_autoptr(GEnumClass) klass = NULL;
+
+  g_return_val_if_fail (G_TYPE_IS_ENUM (enum_type), FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  klass = g_type_class_ref (enum_type);
+
   return bolt_enum_class_validate (klass, value, error);
 }
 
 const char *
-bolt_enum_to_string (GType    enum_type,
-                     gint     value,
-                     GError **error)
+bolt_enum_class_to_string (GEnumClass *klass,
+                           gint        value,
+                           GError    **error)
 {
-  g_autoptr(GEnumClass) klass = NULL;
   GEnumValue *ev;
 
-  klass = g_type_class_ref (enum_type);
+  g_return_val_if_fail (G_IS_ENUM_CLASS (klass), NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
 
   if (!bolt_enum_class_validate (klass, value, error))
     return NULL;
@@ -88,23 +87,18 @@ bolt_enum_to_string (GType    enum_type,
   return ev->value_nick;
 }
 
-gint
-bolt_enum_from_string (GType       enum_type,
-                       const char *string,
-                       GError    **error)
+
+gboolean
+bolt_enum_class_from_string (GEnumClass *klass,
+                             const char *string,
+                             gint       *enum_out,
+                             GError    **error)
 {
-  g_autoptr(GEnumClass) klass = NULL;
   const char *name;
   GEnumValue *ev;
 
-  klass = g_type_class_ref (enum_type);
-
-  if (klass == NULL)
-    {
-      g_set_error (error, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS,
-                   "could not determine enum class");
-      return -1;
-    }
+  g_return_val_if_fail (G_IS_ENUM_CLASS (klass), FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   if (string == NULL)
     {
@@ -112,20 +106,56 @@ bolt_enum_from_string (GType       enum_type,
       g_set_error (error, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS,
                    "empty string passed for enum class for '%s'",
                    name);
-      return -1;
+      return FALSE;
     }
 
   ev = g_enum_get_value_by_nick (klass, string);
 
   if (ev == NULL)
     {
-      name = g_type_name (enum_type);
+      name = g_type_name_from_class ((GTypeClass *) klass);
       g_set_error (error, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS,
                    "invalid string '%s' for enum '%s'", string, name);
-      return -1;
+      return FALSE;
     }
 
-  return ev->value;
+  if (enum_out)
+    *enum_out = ev->value;
+
+  return TRUE;
+}
+
+const char *
+bolt_enum_to_string (GType    enum_type,
+                     gint     value,
+                     GError **error)
+{
+  g_autoptr(GEnumClass) klass = NULL;
+
+  g_return_val_if_fail (G_TYPE_IS_ENUM (enum_type), NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
+
+  klass = g_type_class_ref (enum_type);
+
+  return bolt_enum_class_to_string (klass, value, error);
+}
+
+gint
+bolt_enum_from_string (GType       enum_type,
+                       const char *string,
+                       GError    **error)
+{
+  g_autoptr(GEnumClass) klass = NULL;
+  gint iv = -1;
+
+  g_return_val_if_fail (G_TYPE_IS_ENUM (enum_type), -1);
+  g_return_val_if_fail (error == NULL || *error == NULL, -1);
+
+  klass = g_type_class_ref (enum_type);
+
+  bolt_enum_class_from_string (klass, string, &iv, error);
+
+  return iv;
 }
 
 char *
@@ -137,15 +167,8 @@ bolt_flags_class_to_string (GFlagsClass *flags_class,
   const char *name;
   GFlagsValue *fv;
 
-  if (flags_class == NULL)
-    {
-      name = g_type_name_from_class ((GTypeClass *) flags_class);
-      g_set_error (error, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS,
-                   "could not determine flags class for '%s'",
-                   name);
-
-      return FALSE;
-    }
+  g_return_val_if_fail (G_IS_FLAGS_CLASS (flags_class), NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
 
   fv = g_flags_get_first_value (flags_class, value);
   if (fv == NULL)
@@ -194,13 +217,8 @@ bolt_flags_class_from_string (GFlagsClass *flags_class,
   const char *name;
   guint flags = 0;
 
-  if (flags_class == NULL)
-    {
-      g_set_error (error, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS,
-                   "could not determine flags class");
-
-      return FALSE;
-    }
+  g_return_val_if_fail (G_IS_FLAGS_CLASS (flags_class), FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   if (string == NULL)
     {
@@ -246,7 +264,11 @@ bolt_flags_to_string (GType    flags_type,
 {
   g_autoptr(GFlagsClass) klass = NULL;
 
+  g_return_val_if_fail (G_TYPE_IS_FLAGS (flags_type), NULL);
+  g_return_val_if_fail (error == NULL || *error == NULL, NULL);
+
   klass = g_type_class_ref (flags_type);
+
   return bolt_flags_class_to_string (klass, value, error);
 }
 
@@ -258,7 +280,11 @@ bolt_flags_from_string (GType       flags_type,
 {
   g_autoptr(GFlagsClass) klass = NULL;
 
+  g_return_val_if_fail (G_TYPE_IS_FLAGS (flags_type), FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
   klass = g_type_class_ref (flags_type);
+
   return bolt_flags_class_from_string (klass, string, flags_out, error);
 }
 
@@ -302,12 +328,6 @@ bolt_status_is_pending (BoltStatus status)
 }
 
 gboolean
-bolt_status_validate (BoltStatus status)
-{
-  return bolt_enum_validate (BOLT_TYPE_STATUS, status, NULL);
-}
-
-gboolean
 bolt_status_is_connected (BoltStatus status)
 {
   return status > BOLT_STATUS_DISCONNECTED;
@@ -323,12 +343,6 @@ const char *
 bolt_security_to_string (BoltSecurity security)
 {
   return bolt_enum_to_string (BOLT_TYPE_SECURITY, security, NULL);
-}
-
-gboolean
-bolt_security_validate (BoltSecurity security)
-{
-  return bolt_enum_validate (BOLT_TYPE_SECURITY, security, NULL);
 }
 
 gboolean
@@ -385,13 +399,13 @@ bolt_device_type_to_string (BoltDeviceType type)
 }
 
 gboolean
-bolt_device_type_validate (BoltDeviceType type)
-{
-  return bolt_enum_validate (BOLT_TYPE_DEVICE_TYPE, type, NULL);
-}
-
-gboolean
 bolt_device_type_is_host (BoltDeviceType type)
 {
   return type == BOLT_DEVICE_HOST;
+}
+
+const char *
+bolt_power_state_to_string (BoltPowerState state)
+{
+  return bolt_enum_to_string (BOLT_TYPE_POWER_STATE, state, NULL);
 }

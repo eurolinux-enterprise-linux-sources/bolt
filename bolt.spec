@@ -1,12 +1,14 @@
 Name:          bolt
-Version:       0.4
-Release:       3%{?dist}
+Version:       0.7
+Release:       1%{?dist}
 Summary:       Thunderbolt device manager
 License:       LGPLv2+
 URL:           https://gitlab.freedesktop.org/bolt/bolt
 Source0:       %{url}/-/archive/%{version}/%{name}-%{version}.tar.bz2
 Patch0:        py2-compat.patch
-Patch1:        restricting-capabilities.patch
+Patch1:        journal-fix-format.patch
+Patch2:        use-sendfile.patch
+Patch3:        unsupported-settings.patch
 
 BuildRequires: gcc
 BuildRequires: asciidoc
@@ -41,12 +43,10 @@ boltctl, can be used to control the daemon and perform all the above
 mentioned tasks.
 
 %prep
-%setup -q
-%patch0 -p1
-%patch1 -p1
+%autosetup -p1
 
 %build
-%meson -Ddb-path=%{_localstatedir}/lib/boltd
+%meson -Ddb-name=boltd
 %meson_build
 
 %check
@@ -83,6 +83,14 @@ install -m0755 -d $RPM_BUILD_ROOT%{_localstatedir}/lib/boltd
 %dir %{_localstatedir}/lib/boltd
 
 %changelog
+* Tue Mar 26 2019 Christian Kellner <ckellner@redhat.com> - 0.7-1
+- bolt 0.7 release with pre-bootacl support.
+  Resolves: #1629713
+- Patch to fix a format string bug in the 0.7
+- Drop restricting-capabilities.patch (included in 0.7)
+- Patch to not use unsuppported unit file settings.
+  Resolves: #1631050
+
 * Wed Jul 18 2018 Christian Kellner <ckellner@redhat.com> - 0.4-3
 - Include patch to tighten sandbox by restricting capabilities
 - Resolves: #1559611

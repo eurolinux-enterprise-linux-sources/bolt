@@ -1,0 +1,38 @@
+From 6b62f6a9c94db39c635215ed4acf48bfe4b99d23 Mon Sep 17 00:00:00 2001
+From: Christian Kellner <christian@kellner.me>
+Date: Wed, 27 Mar 2019 15:05:40 +0100
+Subject: [PATCH] data: remove unsupported service file settings
+
+On older systemd (say 219) some of the settings we use in bolt are
+not supported and systemd would warn about them, so remove them.
+---
+ data/bolt.service.in | 10 ----------
+ 1 file changed, 10 deletions(-)
+
+diff --git a/data/bolt.service.in b/data/bolt.service.in
+index d17b4c7..a9e7a8a 100644
+--- a/data/bolt.service.in
++++ b/data/bolt.service.in
+@@ -11,19 +11,9 @@ ExecStart=@libexecdir@/boltd
+ Restart=on-failure
+ NotifyAccess=main
+ 
+-MemoryDenyWriteExecute=yes
+ PrivateTmp=yes
+-ProtectControlGroups=yes
+ ProtectHome=yes
+-ProtectKernelModules=yes
+ ProtectSystem=full
+ RestrictAddressFamilies=AF_NETLINK AF_UNIX
+-RestrictRealtime=yes
+-ReadWritePaths=@dbdir@
+ SystemCallFilter=~@mount
+ CapabilityBoundingSet=CAP_NET_ADMIN
+-
+-#directory management
+-RuntimeDirectory=@dbname@
+-RuntimeDirectoryPreserve=yes
+-StateDirectory=@dbname@
+-- 
+2.20.1
+
