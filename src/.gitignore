@@ -1,0 +1,19 @@
+
+# files
+*~
+*.log
+*.xz
+
+# directories
+build/
+
+# coverity
+cov-int/
+coverity/
+
+# cquery
+.cquery_cached_index/
+compile_commands.json
+
+# visual studio code
+.vscode/
